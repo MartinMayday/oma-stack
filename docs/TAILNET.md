@@ -26,11 +26,11 @@ listens on a routable address, `tailscale serve` is tailnet-only and
 `tailscale funnel` publishes to the entire internet and is never used here
 ([serve](https://tailscale.com/docs/features/tailscale-serve) ·
 [funnel](https://tailscale.com/docs/features/tailscale-funnel)); **no LAN
-exposure** — every service keeps its loopback bind (Forgejo
-`127.0.0.1:3000`, OpenBot `127.0.0.1:3001`), with one deliberate exception:
-the bridge binds `0.0.0.0:8765` because the OpenBot container reaches it
-through the Docker bridge gateway, and it answers only callers inside
-`127.0.0.1/32`, `::1/128`, `172.16.0.0/12` and `100.64.0.0/10`
+exposure** — Forgejo and OpenBot keep their loopback binds (`127.0.0.1:3000`,
+`127.0.0.1:3001`), with one deliberate exception: the bridge binds
+`0.0.0.0:8765` because the OpenBot container reaches it through the Docker
+bridge gateway, and it answers only callers inside `127.0.0.1/32`, `::1/128`,
+`172.16.0.0/12` and `100.64.0.0/10`
 ([ADR-0003](adr/0003-bridge-peer-cidr-allowlist.md)); **single user, one
 identity** — one tailnet, one owner, five devices, access control by a
 grants-only policy file rather than a firewall ruleset, and WireGuard
@@ -49,8 +49,8 @@ encrypting the traffic underneath.
 | **Proxmox node "hl-pve01"** | Proxmox VE 8 (Debian 12 base) | Tailscale on the **PVE host**, not inside a guest ([Proxmox](https://tailscale.com/docs/integrations/proxmox)) | Reaches the Proxmox web UI on 8006 and the guests | An unprivileged LXC needs `/dev/net/tun` passthrough (`pct set <CTID> --dev0 /dev/net/tun`, `--features keyctl=1,nesting=1`) or userspace mode ([LXC](https://tailscale.com/docs/features/containers/lxc/lxc-unprivileged)). Never advertise the same LAN subnet from two nodes: overlapping routes cause conflicts, so if `hl-pve01` advertises the PVE LAN, `oma` must not | `hl-pve01` |
 
 The machine name is set differently per platform: on Linux it comes from
-`--hostname` on `tailscale up`, on mobile and macOS you edit the device name
-in the admin console. MagicDNS names resolve as `<name>.<tailnet>.ts.net`
+`--hostname` on `tailscale up`, on mobile and macOS you edit it in the admin
+console. MagicDNS names resolve as `<name>.<tailnet>.ts.net`
 ([MagicDNS](https://tailscale.com/docs/features/magicdns)).
 
 ---
@@ -184,8 +184,7 @@ Forgejo's git SSH server is separate from its web UI: the kit writes
 into `/etc/forgejo/app.ini`, and the refresh rewrites `SSH_DOMAIN` to the
 tailnet name so clone URLs point at the tailnet. No listen host is pinned
 for that port — check it with `ss -ltn 'sport = :2222'`; if it is bound to
-`0.0.0.0` it is on the LAN too, and the §5 grant controls tailnet
-reachability, not the bind address.
+`0.0.0.0` it is on the LAN too.
 
 ### 4.2 OpenBot — the one exception
 
@@ -237,8 +236,7 @@ console: **Settings → Access controls**.
 **Apply it before you log the box in with the tag.** The file creates
 `tagOwners` for `tag:oma-server`, and the CLI refuses to apply a tag whose
 owner list does not cover you. A node that fails the tag claim comes up
-untagged: it keeps a 180-day key and is not covered by the `tag:oma-server`
-grant.
+untagged: it keeps a 180-day key and is not covered by the grant.
 
 ### What it grants
 
@@ -274,8 +272,7 @@ Saving a policy file that contains a `grants` section **flips the tailnet
 from allow-all to deny-by-default**. From that moment every unlisted path is
 denied: any port on `oma` other than 443, 9443, 2222 and 22, and any service
 on `oma` that is not in the grants. Save it deliberately, not as a routine.
-The console validates the file on save and rejects an invalid one; there is
-no `tailscale policy check` command.
+The console validates the file on save and rejects an invalid one.
 
 ---
 
@@ -323,8 +320,7 @@ sudo tailscale up --auth-key="$(cat /root/.config/tailscale/authkey)" \
 flow), or `tailscale up --force-reauth`
 ([logout](https://tailscale.com/docs/reference/tailscale-cli#logout)). A
 logout on an ephemeral node removes the node from the tailnet immediately.
-Revoking an auth key does **not** deauthorize the nodes that already used
-it.
+Revoking an auth key does **not** deauthorize the nodes that already used it.
 
 ---
 
