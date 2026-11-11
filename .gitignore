@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated at install time
+components/openbot/.env
+components/openbot/openbot.env
+config/host.env.local
+
+# Runtime artefacts
+*.log
+*.pid
+.env
+.env.*
+!config/host.env
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local test scratch
+/tmp/
+*.tmp
+*.bak

@@ -1,0 +1,29 @@
+name: forgejo-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run the repo's own validation
+        run: |
+          if [ -f Tools/validate-scaffold.py ]; then
+            python3 Tools/validate-scaffold.py
+          elif [ -d tests ]; then
+            python3 -m pytest tests/ -q
+          else
+            echo "nothing to validate — define the command here"
+          fi

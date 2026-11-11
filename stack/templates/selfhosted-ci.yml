@@ -1,0 +1,26 @@
+name: selfhosted-ci
+
+# Public repos only. While the GitHub account is billing-locked, a hosted
+# runner is refused, but a self-hosted runner still gets the job.
+#
+# The only difference from a normal workflow is the `runs-on:` line.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: python3 -m pytest tests/ -q

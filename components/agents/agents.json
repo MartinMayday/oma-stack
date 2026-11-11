@@ -1,0 +1,50 @@
+{
+  "default": "qoder",
+  "_comment": [
+    "The agent registry. Each entry is one AG-UI endpoint OpenBot can register,",
+    "and one name a case file can be addressed to with `assignee:`.",
+    "",
+    "command   : the program that runs the agent. It reads the prompt on stdin",
+    "            (prompt_mode: stdin), as one argument (prompt_mode: arg), or",
+    "            with {prompt} substituted into an argument (prompt_mode: argv).",
+    "cwd       : where it runs. Point this at the agent-library checkout.",
+    "timeout   : seconds before the run is abandoned.",
+    "",
+    "An entry with an empty command is listed but not runnable — it is a",
+    "placeholder. Fill the command in and restart the bridge."
+  ],
+  "agents": [
+    {
+      "name": "echo",
+      "description": "Built-in example. Echoes the prompt back, so the bridge can be proved working before a real agent is wired up.",
+      "command": ["/bin/cat"],
+      "cwd": "/tmp",
+      "timeout": 60,
+      "prompt_mode": "stdin"
+    },
+    {
+      "name": "qoder",
+      "description": "Primary engineer agent.",
+      "command": [],
+      "cwd": "@AGENTLIB@",
+      "timeout": 1800,
+      "prompt_mode": "stdin"
+    },
+    {
+      "name": "glm",
+      "description": "Z.ai GLM — second opinion, long-context review.",
+      "command": [],
+      "cwd": "@AGENTLIB@",
+      "timeout": 1800,
+      "prompt_mode": "stdin"
+    },
+    {
+      "name": "minimax",
+      "description": "MiniMax — throughput agent.",
+      "command": [],
+      "cwd": "@AGENTLIB@",
+      "timeout": 1800,
+      "prompt_mode": "stdin"
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+name: oma-openbot
+
+# One container carries the OpenBot app, the API, the browser the Bots drive
+# and (with EMBEDDED_POSTGRES=on) the database.  No Kubernetes, no source
+# checkout, no Bun toolchain on the host.
+#
+# The values that are not secrets come from the .env file next to this one,
+# which the installer writes from config/host.env.  The secrets come from
+# /etc/oma-stack/openbot.env, which is mode 0600 and holds nothing else.
+
+services:
+  openbot:
+    image: ${OPENBOT_IMAGE:-ghcr.io/copilotkit/openbot:latest}
+    container_name: oma-openbot
+    restart: unless-stopped
+
+    env_file:
+      - /etc/oma-stack/openbot.env
+
+    environment:
+      # The database lives inside this container.  DATABASE_URL keeps the
+      # image's own default, which points at that database.
+      EMBEDDED_POSTGRES: "on"
+      PORT: "3001"
+      SERVER_PORT: "3001"
+
+    ports:
+      # Loopback by default: in single-user mode anyone who can reach this
+      # port is an administrator.  Open it up only with a trusted network.
+      - "${OPENBOT_BIND:-127.0.0.1}:${OPENBOT_PORT:-3001}:3001"
+
+    extra_hosts:
+      # The agent bridge and Forgejo both live on the host, not in this
+      # network.  On Linux host-gateway is the docker0 address.
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # The database.  This is the one thing that must survive a reboot.
+      - "${OPENBOT_VOLUME:-oma-openbot-data}:/var/lib/postgresql"
+      # The directory the server writes into (model sign-in files).
+      - "${OPENBOT_DATA_DIR:-/var/lib/forgejo/openbot}:/openbot"
+
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e \"const r = await fetch('http://127.0.0.1:3001/health'); process.exit(r.ok ? 0 : 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
