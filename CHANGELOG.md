@@ -56,6 +56,14 @@ port to the internet.
   `AGENT_BRIDGE_HEARTBEAT_SECONDS=15` while the CLI is silent.
 - **`tailscale serve` runs with `--bg`.** Without it the command runs in the
   foreground and never returns, so the serve unit never completed.
+- **The tag claim is checked, not assumed.** A tag can only be claimed once
+  the policy that owns it is saved in the admin console. The installer now
+  reads `Self.Tags` and says so, with the remedy, when the node came up
+  untagged — which means a 180-day key and no tailnet grant.
+- **The stored `tailscale up` is the one that was run.** The canonical
+  command at `/etc/oma-stack/tailscale-up.cmd` is now built from the
+  arguments the installer used, so a pre-auth key deployment no longer
+  re-claims the tag on the command line. The CLI refuses that pair.
 - **Forgejo binds loopback only.** `FORGEJO_BIND=127.0.0.1`. The tailnet
   publishes it; nothing else can reach it.
 

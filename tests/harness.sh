@@ -408,6 +408,16 @@ check "the default path never binds forgejo to 0.0.0.0" bash -c \
   "! grep -B3 'HTTP_ADDR = 0.0.0.0' '$ROOT/stack/install/40-exposure.sh' | grep -q 'EXPOSE_MODE=none'"
 check "the tailnet publish follows the exposure mode" grep -q 'SERVE_FORGEJO' "$ROOT/components/tailscale/serve-refresh.sh"
 
+# --- the tag depends on the policy, and the policy must come first --------
+check "the installer checks whether the tag was claimed" grep -q 'Self' "$ROOT/components/tailscale/install-tailscale.sh"
+check "the installer says the policy owns the tag" grep -q 'tailnet-policy.json' "$ROOT/components/tailscale/install-tailscale.sh"
+check "the stored login is built from the arguments used" bash -c \
+  "! grep -q 'TAILSCALE_TAGS:+ --advertise-tags' '$ROOT/components/tailscale/install-tailscale.sh'"
+check "a pre-auth key is not mixed with a tag claim" bash -c \
+  "! grep -vE '^[[:space:]]*(#|echo|note|ok|warn)' '$ROOT/components/tailscale/install-tailscale.sh' | grep -F -- '--auth-key' | grep -qF -- '--advertise-tags'"
+check "the runbook says the policy comes first" bash -c \
+  "grep -qi 'before' '$ROOT/docs/TAILNET.md' && grep -qi 'policy' '$ROOT/docs/TAILNET.md'"
+
 # =============================================================================
 head_ "6. the python tests"
 

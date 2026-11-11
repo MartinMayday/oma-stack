@@ -1,21 +1,19 @@
 # TAILNET — the private tailnet
 
 `oma-stack` is private by construction. The box runs Forgejo and OpenBot on
-loopback, and the agent bridge behind a CIDR allowlist; the only way in from
+loopback and the agent bridge behind a CIDR allowlist; the only way in from
 another device is the tailnet Tailscale builds between your own machines. No
-public DNS record, no forwarded port, no reverse proxy on the internet.
-
-This is the operator guide for that tailnet: which devices join it, what the
-kit publishes on it, which policy governs it, and what to do when a key
-expires or a phone cannot open a page.
+public DNS record, no forwarded port, no reverse proxy on the internet. This
+is the operator guide for that tailnet: which devices join it, what the kit
+publishes, which policy governs it, and what to do when a key expires.
 
 ---
 
 ## 1. What the tailnet is for
 
 One thing: it lets your five personal devices reach the services on `oma` and
-nothing else. The box stays private on your LAN; your phone, tablet, other
-laptop and the Proxmox host reach Forgejo, OpenBot and the bridge over a
+nothing else. The box stays private on your LAN; your phone, tablet, laptop
+and the Proxmox host reach Forgejo, OpenBot and the bridge over a
 WireGuard-encrypted mesh, authenticated by your tailnet identity.
 
 **The threat model it replaces:** port forwarding on the home router (every
@@ -27,14 +25,10 @@ listens on a routable address, `tailscale serve` is tailnet-only and
 ([serve](https://tailscale.com/docs/features/tailscale-serve) ·
 [funnel](https://tailscale.com/docs/features/tailscale-funnel)); **no LAN
 exposure** — Forgejo and OpenBot keep their loopback binds (`127.0.0.1:3000`,
-`127.0.0.1:3001`), with one deliberate exception: the bridge binds
-`0.0.0.0:8765` because the OpenBot container reaches it through the Docker
-bridge gateway, and it answers only callers inside `127.0.0.1/32`, `::1/128`,
-`172.16.0.0/12` and `100.64.0.0/10`
-([ADR-0003](adr/0003-bridge-peer-cidr-allowlist.md)); **single user, one
+`127.0.0.1:3001`), except the bridge (`0.0.0.0:8765`, CIDR allowlist, §4.1
+— [ADR-0003](adr/0003-bridge-peer-cidr-allowlist.md)); **single user, one
 identity** — one tailnet, one owner, five devices, access control by a
-grants-only policy file rather than a firewall ruleset, and WireGuard
-encrypting the traffic underneath.
+grants-only policy file, and WireGuard encrypting the traffic underneath.
 
 ---
 
@@ -50,8 +44,7 @@ encrypting the traffic underneath.
 
 The machine name is set differently per platform: on Linux it comes from
 `--hostname` on `tailscale up`, on mobile and macOS you edit it in the admin
-console. MagicDNS names resolve as `<name>.<tailnet>.ts.net`
-([MagicDNS](https://tailscale.com/docs/features/magicdns)).
+console. MagicDNS names resolve as `<name>.<tailnet>.ts.net` ([MagicDNS](https://tailscale.com/docs/features/magicdns)).
 
 ---
 
@@ -59,13 +52,12 @@ console. MagicDNS names resolve as `<name>.<tailnet>.ts.net`
 
 ### 3.1 What the kit runs
 
-`components/tailscale/install-tailscale.sh` is step 45 of the installer. It
-runs exactly this:
+`components/tailscale/install-tailscale.sh` is step 45 of the installer:
 
 ```bash
 sudo pacman -S --needed --noconfirm tailscale     # Arch repo `extra`
 sudo systemctl enable --now tailscaled.service
-sudo tailscale up --hostname=oma --accept-dns=1 --ssh=0
+sudo tailscale up --hostname=oma --accept-dns=1 --ssh=0 --advertise-tags=tag:oma-server
 sudo systemctl enable --now oma-tailscale-serve.service
 ```
 
@@ -81,9 +73,9 @@ it runs `components/tailscale/serve-refresh.sh` at boot and on
 - `TAILSCALE_AUTHKEY=` — a pre-auth key; empty means browser login
 
 Five more switches decide what is published — `TAILSCALE_SERVE_FORGEJO`,
-`TAILSCALE_SERVE_BRIDGE`, `TAILSCALE_SERVE_HTTPS_PORT` (443),
-`TAILSCALE_SERVE_BRIDGE_PORT` (9443), `TAILSCALE_PUBLISH_OPENBOT` — all
-`1` by default (§4).
+`TAILSCALE_SERVE_BRIDGE`, `TAILSCALE_SERVE_HTTPS_PORT`,
+`TAILSCALE_SERVE_BRIDGE_PORT`, `TAILSCALE_PUBLISH_OPENBOT` — all `1` by
+default (§4).
 
 ### 3.2 The login
 
@@ -97,20 +89,20 @@ then run:  sudo oma serve refresh
 ```
 
 **Pre-auth key login** (headless boxes): put the key in `host.env` as
-`TAILSCALE_AUTHKEY="tskey-auth-..."`. The key lives 1–90 days and can be
-reusable or single-use
+`TAILSCALE_AUTHKEY="tskey-auth-..."`. It lives 1–90 days, reusable or
+single-use
 ([auth keys](https://tailscale.com/docs/features/access-control/auth-keys));
-for unattended re-provisioning use an OAuth client secret instead, which
-does not expire
-([OAuth clients](https://tailscale.com/docs/features/oauth-clients)).
+for unattended use an OAuth client secret, which does not expire
+([OAuth clients](https://tailscale.com/docs/features/oauth-clients)). The key
+must carry `tag:oma-server` itself, so this login omits `--advertise-tags`.
 
 **`tailscale up` flags are not persisted** between runs (client v1.8+). A
-later bare `tailscale up` resets them to the defaults and prints a
-copy-pasteable full command
+later bare `tailscale up` resets them and prints a copy-pasteable full
+command
 ([CLI reference](https://tailscale.com/docs/reference/tailscale-cli#up)). The
-kit therefore keeps the canonical command on disk at
-`/etc/oma-stack/tailscale-up.cmd`; re-apply that file — not a subset of it
-— after any `tailscale up`, `tailscale down` or re-authentication.
+kit therefore keeps the canonical command at `/etc/oma-stack/tailscale-up.cmd`;
+re-apply that file — not a subset of it — after any `tailscale up`,
+`tailscale down` or re-authentication.
 
 ### 3.3 The tag caveat
 
@@ -119,9 +111,9 @@ The node is tagged `tag:oma-server`, which has three consequences
 
 - **A tag and a pre-auth key do not go together.** The auth key carries its
   own tags; the CLI refuses `--advertise-tags` together with `--auth-key`.
-  With a key, the key must be created with the tag pre-assigned. With a
-  browser login the tag can be claimed on the command line — but only after
-  the policy file that owns the tag has been saved (§5).
+  With a key, create the key with the tag pre-assigned. With a browser login
+  the tag can be claimed on the command line — but only after the policy
+  file that owns the tag has been saved (§5).
 - **A tagged device has no user identity.** Applying a tag removes the
   device's user-based authentication: a device cannot be both a user and a
   tag. `oma` is therefore not covered by `autogroup:self` and needs an
@@ -142,10 +134,9 @@ The node is tagged `tag:oma-server`, which has three consequences
 | `ssh://git@oma.<tailnet>.ts.net:2222` | Forgejo's built-in git SSH server | the port Forgejo itself listens on |
 
 Forgejo is published on the tailnet only when `EXPOSE_MODE` is `tailnet`,
-which is the default. In `lan` mode it already answers on the LAN under its
-own address and the tailnet leaves it alone; in `caddy` mode the domain owns
-the name; in `none` mode nothing publishes it at all. OpenBot's publish is
-not gated on the mode — the tailnet address is the only way to reach it.
+the default. In `lan` mode it already answers on the LAN; in `caddy` mode the
+domain owns the name; in `none` mode nothing publishes it. OpenBot's publish
+is not gated on the mode — the tailnet address is the only way in.
 
 The serve commands the kit runs, in full:
 
@@ -154,8 +145,7 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:3000
 sudo tailscale serve --bg --https=9443 http://127.0.0.1:8765
 ```
 
-Three rules govern those lines
-([serve reference](https://tailscale.com/docs/reference/tailscale-cli/serve)):
+Three rules govern those lines ([serve reference](https://tailscale.com/docs/reference/tailscale-cli/serve)):
 
 - **`--bg` is mandatory.** Without it the command runs in the foreground and
   never returns, so the `Type=oneshot` systemd unit would block until its
@@ -163,28 +153,24 @@ Three rules govern those lines
   reboot and a `tailscale down`/`up`.
 - **The syntax changed in tailscale 1.52 (October 2023).** The old
   `tailscale serve 3000 https` forms are gone; the kit falls back to the
-  legacy form for port 443 only and warns otherwise, because multi-port
-  publishing needs tailscale ≥ 1.52
-  ([the change](https://tailscale.com/blog/reintroducing-serve-funnel)).
+  legacy form for port 443 only, because multi-port publishing needs
+  tailscale ≥ 1.52 ([the change](https://tailscale.com/blog/reintroducing-serve-funnel)).
 - **Serve proxies only to `http://127.0.0.1:<port>`.** That is why the
-  services keep a loopback bind. A container published to `0.0.0.0` is not
-  reachable, and `host.docker.internal` on Linux is the **Docker bridge
-  gateway**, not `tailscale0` — never a serve target, and it would put the
-  service back on the LAN
+  services keep a loopback bind. `host.docker.internal` on Linux is the
+  **Docker bridge gateway**, not `tailscale0` — never a serve target
   ([Docker guide](https://tailscale.com/blog/docker-tailscale-guide)).
 
 The bridge is the one service that does not keep a loopback bind: it binds
 `0.0.0.0:8765` so the OpenBot container can reach it, and it refuses every
 caller outside its CIDR allowlist. Serve still targets `127.0.0.1:8765`,
-which is inside the allowlist
-([ADR-0003](adr/0003-bridge-peer-cidr-allowlist.md)).
+inside the allowlist ([ADR-0003](adr/0003-bridge-peer-cidr-allowlist.md)).
 
 Forgejo's git SSH server is separate from its web UI: the kit writes
 `SSH_PORT = 2222`, `SSH_LISTEN_PORT = 2222` and `START_SSH_SERVER = true`
-into `/etc/forgejo/app.ini`, and the refresh rewrites `SSH_DOMAIN` to the
-tailnet name so clone URLs point at the tailnet. No listen host is pinned
-for that port — check it with `ss -ltn 'sport = :2222'`; if it is bound to
-`0.0.0.0` it is on the LAN too.
+into `/etc/forgejo/app.ini`, and the refresh rewrites `SSH_DOMAIN` so clone
+URLs point at the tailnet. No listen host is pinned — check it with
+`ss -ltn 'sport = :2222'`; if it is bound to `0.0.0.0` it is on the LAN too,
+and the §5 grant controls tailnet reachability, not the bind address.
 
 ### 4.2 OpenBot — the one exception
 
@@ -193,19 +179,17 @@ the tailnet **address**, in plain HTTP: `http://100.x.y.z:3001`.
 
 The reason is upstream behaviour, not preference. OpenBot in single-user mode
 (`OPENBOT_SINGLE_USER=true`, the kit default) admits **every request as one
-administrator with no sign-in**. Upstream therefore refuses to start when it
-is told about a *public* address in `OPENBOT_PUBLIC_URL`,
-`OPENBOT_APP_URL` or `TRUSTED_ORIGINS` — a MagicDNS name such as
-`oma.<tailnet>.ts.net` is classified as public, while a `100.64.0.0/10`
-CGNAT address is classified as private and only produces a warning. The
-classification is in `server/src/config.ts`, function `reachOf()`. So the
-tailnet address goes in and the name does not. The transport is already
-encrypted: the tailnet path is WireGuard, so plain HTTP inside the tailnet
-is not plain HTTP on the wire.
+administrator with no sign-in**, so upstream refuses to start when it is told
+about a *public* address in `OPENBOT_PUBLIC_URL`, `OPENBOT_APP_URL` or
+`TRUSTED_ORIGINS` — a MagicDNS name such as `oma.<tailnet>.ts.net` is
+classified as public, while a `100.64.0.0/10` CGNAT address is private and
+only produces a warning. The classification is in `server/src/config.ts`,
+function `reachOf()`. The tailnet address goes in and the name does not; the
+transport is already encrypted, because the tailnet path is WireGuard.
 
-The kit implements this in `components/tailscale/serve-refresh.sh`, in two
-steps. First it writes `components/openbot/docker-compose.override.yml`,
-publishing the container on the tailnet address as well as loopback:
+The kit implements this in `components/tailscale/serve-refresh.sh`. First it
+writes `components/openbot/docker-compose.override.yml`, publishing the
+container on the tailnet address as well as loopback:
 
 ```yaml
 services:
@@ -214,14 +198,13 @@ services:
 ```
 
 Docker Compose merges this override automatically, because the OpenBot unit
-runs `docker compose up -d` with the project directory as its working
-directory; delete the file to take OpenBot off the tailnet, and the next
-`oma serve refresh` removes it too. Second, the refresh appends the origin
-`http://<100.x.y.z>:3001` to `TRUSTED_ORIGINS` in
-`/etc/oma-stack/openbot.env` — without it the browser's `Origin` header is
-refused and the app does not talk to its own API. So **OpenBot's URL is an
-address, not a name**: it changes when the tailnet address changes and is
-not covered by the HTTPS certificates Serve issues for the `.ts.net` name.
+runs `docker compose up -d` in the project directory; delete the file to take
+OpenBot off the tailnet, and the next `oma serve refresh` removes it.
+Second, the refresh appends the origin `http://<100.x.y.z>:3001` to
+`TRUSTED_ORIGINS` in `/etc/oma-stack/openbot.env` — without it the browser's
+`Origin` header is refused and the app does not talk to its own API. So
+**OpenBot's URL is an address, not a name**: it moves with the tailnet
+address and is not covered by the certificates Serve issues for `.ts.net`.
 `oma open` prints the current one.
 
 ---
@@ -230,13 +213,13 @@ not covered by the HTTPS certificates Serve issues for the `.ts.net` name.
 
 The kit ships a policy template at `components/tailscale/tailnet-policy.json`
 and installs it to `/etc/oma-stack/tailnet-policy.json`. The kit does not
-apply it for you — there is no CLI for that. Paste it into the admin
-console: **Settings → Access controls**.
+apply it — there is no CLI for that. Paste it into the admin console:
+**Settings → Access controls**. The `ssh` block is inert: `TAILSCALE_SSH=0`.
 
 **Apply it before you log the box in with the tag.** The file creates
-`tagOwners` for `tag:oma-server`, and the CLI refuses to apply a tag whose
-owner list does not cover you. A node that fails the tag claim comes up
-untagged: it keeps a 180-day key and is not covered by the grant.
+`tagOwners` for `tag:oma-server`, and the CLI refuses a tag whose owner list
+does not cover you. A node that fails the tag claim comes up untagged: it
+keeps a 180-day key and is not covered by the grant.
 
 ### What it grants
 
@@ -250,44 +233,40 @@ untagged: it keeps a 180-day key and is not covered by the grant.
 | `autogroup:member` | `tag:oma-server` | `tcp:2222` | Forgejo's built-in git SSH server |
 | `autogroup:member` | `tag:oma-server` | `tcp:22` | the box's own system SSH |
 
-Two things to internalise about this file
-([grants](https://tailscale.com/docs/reference/syntax/grants) ·
+Two things to internalise about this file ([grants](https://tailscale.com/docs/reference/syntax/grants) ·
 [policy file](https://tailscale.com/docs/reference/syntax/policy-file)):
 
 - **There is no `acls` key, and that is deliberate.** A tailnet with no
   saved policy uses the **default allow-all** policy, not deny-all
-  ([ACLs](https://tailscale.com/docs/features/access-control/acls)). Grants
+  ([ACLs](https://tailscale.com/docs/features/access-control/acls)); grants
   are deny-by-default, and Tailscale's own examples are grants-only files
-  with no `acls` section
   ([examples](https://tailscale.com/docs/reference/examples/grants)). Do not
   add `"acls": []`: an empty `acls` section means "deny all", which with
   grants is a different and ambiguous configuration.
 - **`autogroup:self` never matches a tagged device.** It applies only to
-  user-owned devices and cannot be combined with `autogroup:tagged`. That is
-  why the tagged server `oma` needs the explicit `tag:oma-server` grant.
+  user-owned devices and cannot be combined with `autogroup:tagged`, which
+  is why the tagged server `oma` needs the explicit `tag:oma-server` grant.
 
 ### What changes when you save it
 
-Saving a policy file that contains a `grants` section **flips the tailnet
-from allow-all to deny-by-default**. From that moment every unlisted path is
-denied: any port on `oma` other than 443, 9443, 2222 and 22, and any service
-on `oma` that is not in the grants. Save it deliberately, not as a routine.
-The console validates the file on save and rejects an invalid one.
+Saving a policy file with a `grants` section **flips the tailnet from
+allow-all to deny-by-default**. From then on every unlisted path is denied:
+any port on `oma` other than 443, 9443, 2222 and 22, and any service not in
+the grants. Save it deliberately. The console validates the file on save and
+rejects an invalid one; there is no `tailscale policy check` command.
 
 ---
 
 ## 6. Key expiry
 
-Node keys expire. The default period is **180 days**
+Node keys expire after **180 days** by default
 ([key expiry](https://tailscale.com/docs/features/access-control/key-expiry)).
+Without re-authentication, connections to and from it stop working.
 
 | Node | Key expiry |
 |---|---|
 | `oma` (`tag:oma-server`) | **disabled** — tagging a device turns node-key expiry off by default ([tags](https://tailscale.com/docs/features/tags#key-expiry)) |
 | iPhone, iPad, Mac Studio, `hl-pve01` | 180 days. They are **not** tagged, so they still expire and must be reauthorized from the admin console |
-
-When a key expires and the node does not re-authenticate, connections to and
-from that endpoint stop working.
 
 ### Checking
 
@@ -297,9 +276,8 @@ tailscale status --json | jq -r '
   (.Peer[] | select(.KeyExpiry != null) | "\(.DNSName) expires \(.KeyExpiry)")'
 ```
 
-The three fields that matter are `.Self.KeyExpiry`, `.Self.Expired` and
-`.Peer[*].KeyExpiry`. Alert when any of them is inside **30 days**, or when
-`.Self.Expired` / `.Peer[*].Expired` is already `true`.
+The fields that matter are `.Self.KeyExpiry`, `.Self.Expired` and
+`.Peer[*].KeyExpiry`. Alert inside **30 days**, or when `Expired` is `true`.
 
 ### Fixing
 
@@ -309,18 +287,20 @@ expiry*: **"Temporarily extend key"** (+30 minutes) to get back in, then
 
 **Unattended, for a box.** Re-authenticate with a fresh auth key or an OAuth
 client secret — the secret does not expire
-([OAuth clients](https://tailscale.com/docs/features/oauth-clients)):
+([OAuth clients](https://tailscale.com/docs/features/oauth-clients)). The key
+must already carry `tag:oma-server`; `--advertise-tags` and `--auth-key` do
+not go together (§3.3):
 
 ```bash
 sudo tailscale up --auth-key="$(cat /root/.config/tailscale/authkey)" \
-  --hostname=oma --accept-dns=1 --ssh=0 --advertise-tags=tag:oma-server
+  --hostname=oma --accept-dns=1 --ssh=0
 ```
 
 **From the device itself.** `tailscale logout` then `tailscale up` (browser
 flow), or `tailscale up --force-reauth`
 ([logout](https://tailscale.com/docs/reference/tailscale-cli#logout)). A
-logout on an ephemeral node removes the node from the tailnet immediately.
-Revoking an auth key does **not** deauthorize the nodes that already used it.
+logout on an ephemeral node removes it from the tailnet immediately; revoking
+an auth key does **not** deauthorize the nodes that already used it.
 
 ---
 
@@ -338,15 +318,12 @@ sudo oma open            # the URLs, tailnet ones included
 `oma serve refresh` is idempotent: it re-reads the tailnet name and address
 from `tailscale status --json`, rewrites Forgejo's `ROOT_URL`, `DOMAIN` and
 `SSH_DOMAIN`, rewrites the OpenBot override and its `TRUSTED_ORIGINS`, then
-re-applies both serve entries. Run it after a tailnet rename, a change of
-address, or any manual edit of the serve configuration.
+re-applies the serve entries. Run it after a rename or an address change.
 
 ### Health fields
 
-`oma doctor` prints the tailnet section from `tailscale status --json`:
-backend state, name, addresses, tags, expiry and health problems. The raw
-fields behind it
-([ipnstate structs](https://github.com/tailscale/tailscale/blob/main/ipn/ipnstate/ipnstate.go)):
+`oma doctor` prints the tailnet section from `tailscale status --json`. The
+raw fields behind it ([ipnstate structs](https://github.com/tailscale/tailscale/blob/main/ipn/ipnstate/ipnstate.go)):
 
 | Field | Healthy | When it is wrong |
 |---|---|---|
@@ -365,9 +342,7 @@ fields behind it
 
 The kit defaults to `--accept-dns=1`, so tailscale answers DNS for the whole
 tailnet and `oma.<tailnet>.ts.net` resolves system-wide. With `0` the OS
-resolver is left alone and that name may not resolve on the box — the
-internal Tailscale resolver still holds the MagicDNS records, but the OS
-does not use it. Compare the two paths:
+resolver is left alone and that name may not resolve. Compare the two paths:
 
 ```bash
 tailscale dns query oma.<tailnet>.ts.net     # through the local forwarder
@@ -375,14 +350,11 @@ resolvectl query oma.<tailnet>.ts.net        # through the OS resolver
 ```
 
 If the first works and the second does not, turn DNS acceptance back on
-(`TAILSCALE_ACCEPT_DNS="1"`, then re-apply
-`/etc/oma-stack/tailscale-up.cmd`) or add an explicit `~<tailnet>.ts.net`
-route to `100.100.100.100` in systemd-resolved
+(`TAILSCALE_ACCEPT_DNS="1"`, then re-apply `/etc/oma-stack/tailscale-up.cmd`)
+or route `~<tailnet>.ts.net` to `100.100.100.100` in systemd-resolved
 ([DNS reference](https://tailscale.com/docs/reference/tailscale-cli#dns)).
-
-Other diagnostics: `sudo tailscale serve status --json` for the active serve
-configuration, `sudo tailscale netcheck` for connectivity and DERP
-diagnostics, `sudo tailscale bugreport` to attach to a bug report.
+More diagnostics: `sudo tailscale serve status --json`,
+`sudo tailscale netcheck`, `sudo tailscale bugreport`.
 
 ---
 
@@ -398,10 +370,8 @@ diagnostics, `sudo tailscale bugreport` to attach to a bug report.
 | A serve entry points at a port that answers nothing | The target is not on loopback, or the port was published to `0.0.0.0` | Serve proxies only to `http://127.0.0.1:<port>`. Publish the container to `127.0.0.1:<port>:<port>` |
 | OpenBot refuses to start after a tailnet name was added to `TRUSTED_ORIGINS` | Single-user mode refuses to start when it is given a public address, and a `.ts.net` name is public to it | Use the `100.x` tailnet address instead of the MagicDNS name. The kit does this for you (§4.2) |
 | OpenBot's page loads but the app does not talk to its own API | The origin is not trusted | `http://<100.x.y.z>:3001` must be in `TRUSTED_ORIGINS` in `/etc/oma-stack/openbot.env` |
-| The box is on the tailnet but nothing is published | The serve unit has not run since login | `sudo oma serve refresh` |
-| Forgejo's links point at `127.0.0.1` | `ROOT_URL` was not rewritten to the tailnet name | `sudo oma serve refresh` — it rewrites `ROOT_URL`, `DOMAIN` and `SSH_DOMAIN` and restarts Forgejo |
-| `oma doctor` shows the tags as `(none)` | The tag claim failed because the policy was not saved first | Save `/etc/oma-stack/tailnet-policy.json` in the admin console, then re-run `tailscale up` |
-| `oma doctor` shows a 180-day expiry on a tagged node | The node is not tagged | Same as above: save the policy, then re-apply `/etc/oma-stack/tailscale-up.cmd` |
+| The box is on the tailnet but nothing is published, or Forgejo's links point at `127.0.0.1` | The serve unit has not run since login, or `ROOT_URL` was not rewritten to the tailnet name | `sudo oma serve refresh` — it rewrites `ROOT_URL`, `DOMAIN` and `SSH_DOMAIN` and restarts Forgejo |
+| `oma doctor` shows the tags as `(none)`, or a 180-day expiry on a tagged node | The tag claim failed because the policy was not saved first | Save `/etc/oma-stack/tailnet-policy.json` in the admin console, then re-run `tailscale up` |
 | A device stopped working after about six months | Its node key expired | Reauthorize it from the admin console, or re-run `tailscale up --force-reauth` (§6) |
 | The tailnet name resolves in the tailscale resolver but not in the system | `--accept-dns=0`, or the OS resolver points elsewhere | `tailscale dns query <name>` vs `resolvectl query <name>` (§7) |
 | A service is reachable over the LAN | It is bound to `0.0.0.0` | The tailnet grant does not restrict a bind address. Check `ss -ltnp` and put the service back on `127.0.0.1` |

@@ -147,6 +147,7 @@ cat <<EOF
     3. Put a GitHub PAT (repo scope) in ${GITHUB_TOKEN_FILE}, mode 0600
     4. Finish the tailnet login if it asked for one:  sudo tailscale up
     5. Paste ${CRED_DIR}/tailnet-policy.json into the Tailscale admin console
+       (before the node claims its tag)
     6. Health:  oma doctor
     7. Docs:    ${HERE}/docs/RUNBOOK.md
 =================================================================
