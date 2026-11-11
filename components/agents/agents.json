@@ -1,5 +1,6 @@
 {
   "default": "qoder",
+  "chain": ["qoder", "glm", "minimax", "echo"],
   "_comment": [
     "The agent registry. Each entry is one AG-UI endpoint OpenBot can register,",
     "and one name a case file can be addressed to with `assignee:`.",
@@ -10,40 +11,58 @@
     "cwd       : where it runs. Point this at the agent-library checkout.",
     "timeout   : seconds before the run is abandoned.",
     "",
-    "An entry with an empty command is listed but not runnable — it is a",
-    "placeholder. Fill the command in and restart the bridge."
+    "chain     : the routing order. The default answers first; if it fails,",
+    "            the next one takes over. The AG-UI reply carries the name of",
+    "            the agent that actually answered, and the handoff audit log",
+    "            records it too.",
+    "",
+    "The three real agents below are the ones this box already has, with the",
+    "commands the agent-library receipts prove work:",
+    "",
+    "  qoder    qoder -p            Qoder CLI, headless, no session persisted",
+    "  glm      claude -p            Claude Code on zai/glm-5.3",
+    "  minimax  codex exec -m        Codex on minimax-io/MiniMax-M3.1-Flash",
+    "",
+    "Evidence: agent-library catalogs/skills/canonical/qoder-bridge/SKILL.md:57",
+    "and sessions/labs/staging/WI-006-smart-ai-router-angr8/Cases/",
+    "angr8-003-lang-gate-router/ops/VERIFICATION.md:100 (claude -p) and",
+    ".../receipts/2026-11-07-upgrade-v250.md:32 (codex exec).",
+    "",
+    "The installer detects which of these binaries are on the PATH and only",
+    "keeps the entries it can run.  An entry with an empty command is listed",
+    "but not runnable."
   ],
   "agents": [
+    {
+      "name": "qoder",
+      "description": "Primary engineer agent — the Qoder CLI in headless mode. Note: -p can exit 0 on an error, so the reply is read as text and the exit code alone is not proof of success.",
+      "command": ["qoder", "-p", "--no-session-persistence", "{prompt}"],
+      "cwd": "@AGENTLIB@",
+      "timeout": 1800,
+      "prompt_mode": "argv"
+    },
+    {
+      "name": "glm",
+      "description": "Z.ai GLM — second opinion, long-context review. Claude Code CLI on zai/glm-5.3 through the local router.",
+      "command": ["claude", "-p", "{prompt}"],
+      "cwd": "@AGENTLIB@",
+      "timeout": 1800,
+      "prompt_mode": "argv"
+    },
+    {
+      "name": "minimax",
+      "description": "MiniMax — throughput agent. Codex CLI on minimax-io/MiniMax-M3.1-Flash through the local router.",
+      "command": ["codex", "exec", "--skip-git-repo-check", "-m", "minimax-io/MiniMax-M3.1-Flash", "{prompt}"],
+      "cwd": "@AGENTLIB@",
+      "timeout": 1800,
+      "prompt_mode": "argv"
+    },
     {
       "name": "echo",
       "description": "Built-in example. Echoes the prompt back, so the bridge can be proved working before a real agent is wired up.",
       "command": ["/bin/cat"],
       "cwd": "/tmp",
       "timeout": 60,
-      "prompt_mode": "stdin"
-    },
-    {
-      "name": "qoder",
-      "description": "Primary engineer agent.",
-      "command": [],
-      "cwd": "@AGENTLIB@",
-      "timeout": 1800,
-      "prompt_mode": "stdin"
-    },
-    {
-      "name": "glm",
-      "description": "Z.ai GLM — second opinion, long-context review.",
-      "command": [],
-      "cwd": "@AGENTLIB@",
-      "timeout": 1800,
-      "prompt_mode": "stdin"
-    },
-    {
-      "name": "minimax",
-      "description": "MiniMax — throughput agent.",
-      "command": [],
-      "cwd": "@AGENTLIB@",
-      "timeout": 1800,
       "prompt_mode": "stdin"
     }
   ]

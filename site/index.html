@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oma-stack — your own AI workshop</title>
+<meta name="description" content="Forgejo, CI runners, OpenBot and a local agent bridge on your own hardware. One command. Five devices. One private tailnet.">
+<style>
+  :root{
+    --ink:#08090C; --ink2:#0E1016; --panel:#111319; --panel2:#15181F;
+    --line:rgba(255,255,255,.09); --line2:rgba(255,255,255,.05);
+    --text:#E9EBEF; --muted:#8C93A1; --faint:#5E6572;
+    --ember:#FF6A3D; --ember-dim:rgba(255,106,61,.14);
+    --ice:#7FA9FF; --jade:#57D9A3;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    --max:1120px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--ink);color:var(--text);font-family:var(--sans);
+    font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(900px 480px at 82% -10%,rgba(255,106,61,.10),transparent 60%),
+      radial-gradient(760px 420px at 8% 4%,rgba(127,169,255,.07),transparent 62%);
+    background-repeat:no-repeat;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+  code,pre{font-family:var(--mono)}
+
+  /* ---------- nav ---------- */
+  nav{display:flex;align-items:center;gap:28px;padding:22px 0;font-size:14px}
+  .logo{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-weight:600;letter-spacing:-.02em}
+  .mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(140deg,var(--ember),#B33A17);
+        display:grid;place-items:center;font-size:14px;color:#fff;font-weight:700;box-shadow:0 0 0 1px rgba(255,255,255,.08)}
+  .logo b{color:var(--ember)}
+  nav .links{display:flex;gap:24px;color:var(--muted);margin-left:auto}
+  nav .links a:hover{color:var(--text)}
+  nav .cta{color:var(--text);border:1px solid var(--line);padding:7px 14px;border-radius:8px;background:var(--panel)}
+  nav .cta:hover{border-color:rgba(255,106,61,.5)}
+
+  /* ---------- hero ---------- */
+  header{padding:74px 0 56px}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--ember);margin-bottom:20px}
+  h1{font-size:clamp(38px,6.2vw,70px);line-height:1.03;margin:0 0 22px;letter-spacing:-.035em;font-weight:680}
+  h1 em{font-style:normal;color:var(--ember)}
+  .lede{font-size:19px;color:var(--muted);max-width:60ch;margin:0 0 34px}
+  .lede b{color:var(--text);font-weight:600}
+  .install{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+  .cmd{
+    display:flex;align-items:center;gap:14px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:13px 16px;font-family:var(--mono);font-size:13.5px;color:var(--text);
+    overflow-x:auto;white-space:nowrap;
+  }
+  .cmd .p{color:var(--faint);user-select:none}
+  .cmd b{color:var(--jade);font-weight:500}
+  .btn{display:inline-flex;align-items:center;gap:8px;background:var(--ember);color:#140600;font-weight:650;
+       padding:13px 20px;border-radius:12px;font-size:14.5px;border:1px solid transparent}
+  .btn:hover{background:#ff7d55}
+  .sub{font-size:13px;color:var(--faint);font-family:var(--mono)}
+
+  /* ---------- section ---------- */
+  section{padding:66px 0;border-top:1px solid var(--line2)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:14px}
+  h2{font-size:clamp(25px,3.4vw,36px);line-height:1.14;margin:0 0 14px;letter-spacing:-.025em;font-weight:660}
+  .head{max-width:64ch;margin-bottom:38px}
+  .head p{color:var(--muted);margin:0;font-size:17px}
+
+  /* ---------- diagram ---------- */
+  .board{background:var(--ink2);border:1px solid var(--line);border-radius:16px;padding:26px;overflow-x:auto}
+  .board pre{margin:0;font-size:13px;line-height:1.75;color:var(--muted);white-space:pre}
+  .board .k{color:var(--text);font-weight:600}
+  .board .e{color:var(--ember)}
+  .board .i{color:var(--ice)}
+  .board .j{color:var(--jade)}
+
+  /* ---------- cards ---------- */
+  .grid{display:grid;gap:16px}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
+  .card h3{margin:0 0 8px;font-size:16.5px;letter-spacing:-.01em}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+       color:var(--ember);background:var(--ember-dim);border-radius:6px;padding:3px 8px;margin-bottom:13px}
+  .tag.i{color:var(--ice);background:rgba(127,169,255,.12)}
+  .tag.j{color:var(--jade);background:rgba(87,217,163,.12)}
+
+  /* ---------- devices ---------- */
+  .mesh{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+  .dev{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 17px}
+  .dev .n{font-family:var(--mono);font-size:14px;color:var(--text)}
+  .dev .r{font-size:13px;color:var(--muted);margin-top:4px}
+  .dev .s{font-size:12px;color:var(--faint);margin-top:9px;font-family:var(--mono)}
+
+  /* ---------- rules ---------- */
+  .rules{display:grid;gap:12px}
+  .rule{display:flex;gap:14px;background:var(--panel);border:1px solid var(--line);border-left:2px solid var(--ember);
+        border-radius:0 12px 12px 0;padding:16px 18px}
+  .rule.i{border-left-color:var(--ice)}
+  .rule.j{border-left-color:var(--jade)}
+  .rule .x{font-family:var(--mono);font-size:12px;color:var(--faint);padding-top:3px}
+  .rule p{margin:0;font-size:14.5px;color:var(--muted)}
+  .rule b{color:var(--text);font-weight:600}
+
+  /* ---------- faq ---------- */
+  .faq details{border-top:1px solid var(--line2);padding:18px 0}
+  .faq details:last-child{border-bottom:1px solid var(--line2)}
+  .faq summary{cursor:pointer;font-weight:600;font-size:16px;list-style:none;display:flex;justify-content:space-between;gap:16px}
+  .faq summary::-webkit-details-marker{display:none}
+  .faq summary::after{content:"+";color:var(--faint);font-family:var(--mono);font-weight:400}
+  .faq details[open] summary::after{content:"–"}
+  .faq p{margin:10px 0 0;color:var(--muted);font-size:15px;max-width:72ch}
+
+  footer{padding:44px 0 70px;border-top:1px solid var(--line2);color:var(--faint);font-size:13.5px;
+         display:flex;gap:20px;flex-wrap:wrap;align-items:center}
+  footer .sp{margin-left:auto;font-family:var(--mono)}
+  footer a{color:var(--muted)} footer a:hover{color:var(--text)}
+
+  @media (max-width:640px){
+    nav .links{display:none}
+    header{padding:44px 0 34px}
+    .cmd{font-size:12px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <nav>
+    <div class="logo"><span class="mark">o</span><span>oma<b>·</b>stack</span></div>
+    <div class="links">
+      <a href="#shape">shape</a>
+      <a href="#devices">devices</a>
+      <a href="#inside">inside</a>
+      <a href="#install">install</a>
+      <a href="#faq">faq</a>
+      <a class="cta" href="https://github.com/MartinMayday/oma-stack">github</a>
+    </div>
+  </nav>
+
+  <header>
+    <div class="eyebrow">personal AI infrastructure · one operator · your hardware</div>
+    <h1>Your own AI workshop.<br><em>On hardware you own.</em></h1>
+    <p class="lede">
+      GitHub won't start your jobs and your laptop is full of capable silicon.
+      <b>oma-stack</b> turns that laptop into the CI server, the tracker and the agent
+      surface — and wires your phone, tablet and workstations to it over a private tailnet.
+      One command. No cloud bill. No lock-in.
+    </p>
+    <div class="install">
+      <div class="cmd"><span class="p">$</span><span>curl -fsSL https://raw.githubusercontent.com/MartinMayday/oma-stack/main/bootstrap.sh | sudo bash</span></div>
+      <a class="btn" href="https://github.com/MartinMayday/oma-stack">clone instead</a>
+    </div>
+    <div class="sub">then: <span style="color:var(--jade)">oma doctor</span> · works on Arch / Omarchy · x86_64</div>
+  </header>
+
+  <section id="shape">
+    <div class="head">
+      <div class="kicker">the shape</div>
+      <h2>GitHub stays canonical. Your machine does the work.</h2>
+      <p>Git, issues and pull requests stay exactly where they are. The laptop becomes the
+         executor: it mirrors the repos, runs the pipelines, hosts the agent surface, and
+         keeps the logs. Nothing is written back to GitHub unless you push it yourself.</p>
+    </div>
+    <div class="board">
+<pre>  <span class="k">github</span>  <span class="i">iPhone</span> <span class="i">iPad</span> <span class="i">Mac Studio</span> <span class="i">Proxmox</span> <span class="i">MacBook Pro</span>
+     │ pull            └── <span class="j">tailscale</span> ─────────────────────────┘
+     │ push                                │  private 100.x mesh, HTTPS
+     ▼                                    ▼
+  <span class="e">oma-stack</span> ────────────────────────────────────────────────────────
+   ┌────────────────┐   ┌─────────────────┐   ┌──────────────┐   ┌───────────────┐
+   │ <span class="k">forgejo</span>  :3000 │   │ <span class="k">runner</span>  act   │   │ <span class="k">openbot</span>  :3001 │   │ <span class="k">bridge</span>  :8765 │
+   │ tracker+mirror │   │ executes jobs   │   │ agent UI    │   │ AG-UI + queue │
+   └────────────────┘   └─────────────────┘   └──────────────┘   └───────────────┘
+        hot SSD              hot SSD             docker volume       handoff tree
+</pre>
+    </div>
+  </section>
+
+  <section id="devices">
+    <div class="head">
+      <div class="kicker">one private network</div>
+      <h2>Five devices. One tailnet. Zero open ports.</h2>
+      <p>Every service binds to loopback and is published by <b>tailscale serve</b>, so it is
+         reachable from your own devices over HTTPS and from nowhere else. No router port
+         forwards, no public certificate, no funnel.</p>
+    </div>
+    <div class="mesh">
+      <div class="dev"><div class="n">iPhone</div><div class="r">OpenBot in the browser, Forgejo on the go</div><div class="s">app · exit node ok</div></div>
+      <div class="dev"><div class="n">iPad</div><div class="r">Review a diff, file a case, approve a run</div><div class="s">app</div></div>
+      <div class="dev"><div class="n">macbook-pro</div><div class="r">The workshop itself: CI, agents, data</div><div class="s">oma-stack host</div></div>
+      <div class="dev"><div class="n">mac-studio</div><div class="r">M1 Max — heavy builds and model runs</div><div class="s">app · headless</div></div>
+      <div class="dev"><div class="n">hl-pve01</div><div class="r">Proxmox node — VMs and containers</div><div class="s">app · subnet router</div></div>
+    </div>
+  </section>
+
+  <section id="inside">
+    <div class="head">
+      <div class="kicker">what's inside</div>
+      <h2>Five parts. One config file.</h2>
+      <p>Everything lands in <code>/opt/oma-stack</code>. Everything is configured in
+         <code>/etc/oma-stack/host.env</code>. Re-running the installer is safe: it keeps
+         every secret it finds and every choice you made.</p>
+    </div>
+    <div class="grid g3">
+      <div class="card"><span class="tag">tracker</span><h3>Forgejo</h3>
+        <p>Your tracker, your mirror, your CI server. Repos mirrored one-way from GitHub every 15 minutes; issues snapshotted read-only every 30.</p></div>
+      <div class="card"><span class="tag i">execution</span><h3>Two runners</h3>
+        <p>A Forgejo runner for your own pipelines, and a GitHub self-hosted runner so public repos keep their CI alive while the account is billing-locked.</p></div>
+      <div class="card"><span class="tag i">surface</span><h3>OpenBot</h3>
+        <p>The CopilotKit agent surface in a single container — app, API, browser tools and an embedded database, reachable from any of your devices.</p></div>
+      <div class="card"><span class="tag j">agents</span><h3>Agent bridge</h3>
+        <p>Exposes your local agents over AG-UI so OpenBot can call them, and runs the handoff queue: a case goes in, an answer comes out.</p></div>
+      <div class="card"><span class="tag">ops</span><h3>oma CLI</h3>
+        <p>One command for the whole thing: <code>oma doctor</code> tells you what's broken and what to do, <code>oma status</code> shows the lot in one screen.</p></div>
+      <div class="card"><span class="tag">safety</span><h3>Approvals</h3>
+        <p>The bridge never merges, never deploys, never touches a credential. It writes proposals; a human accepts them. Every handoff is logged.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="head">
+      <div class="kicker">the rules</div>
+      <h2>Boring where it matters.</h2>
+    </div>
+    <div class="rules">
+      <div class="rule"><span class="x">01</span><p><b>Hot data stays on the internal SSD.</b> Database, repositories, CI logs, artifacts, mirror cache, Docker data-root. The 4 TB USB disk holds dated backups and nothing else.</p></div>
+      <div class="rule i"><span class="x">02</span><p><b>The USB disk is optional.</b> Unplug it and CI, the mirror and the tracker keep running — the healthcheck says WARN, never FAIL.</p></div>
+      <div class="rule j"><span class="x">03</span><p><b>One direction only.</b> GitHub → Forgejo. The mirror reads; it never pushes, never opens a PR, never closes an issue.</p></div>
+      <div class="rule"><span class="x">04</span><p><b>Nothing is exposed publicly.</b> Loopback binds, tailscale serve, exact-match agent allowlist, single-user mode on by default.</p></div>
+      <div class="rule i"><span class="x">05</span><p><b>Re-running is safe.</b> Every step is idempotent, every existing secret is kept, GitHub is never touched by the uninstaller.</p></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="head">
+      <div class="kicker">install</div>
+      <h2>Two ways in.</h2>
+      <p>Both end in the same place: <code>/opt/oma-stack</code> installed and
+         <code>/etc/oma-stack/host.env</code> waiting for you.</p>
+    </div>
+    <div class="grid g2">
+      <div class="card">
+        <span class="tag">one line</span>
+        <div class="cmd" style="margin-bottom:14px"><span class="p">$</span><span>curl -fsSL https://raw.githubusercontent.com/MartinMayday/oma-stack/main/bootstrap.sh | sudo bash</span></div>
+        <p>Clones the kit to <code>/opt/oma-stack</code> and runs the installer.</p>
+      </div>
+      <div class="card">
+        <span class="tag">clone</span>
+        <div class="cmd" style="margin-bottom:14px"><span class="p">$</span><span>git clone https://github.com/MartinMayday/oma-stack.git &amp;&amp; cd oma-stack &amp;&amp; sudo ./bootstrap.sh</span></div>
+        <p>Runs the installer from your own checkout, so you can change it first.</p>
+      </div>
+    </div>
+    <div class="grid g2" style="margin-top:16px">
+      <div class="card"><h3>Then, two keys</h3>
+        <p>The only things you must supply: the CopilotKit Intelligence key and one model key.
+           The installer generates every other secret and tells you exactly what is still missing.</p>
+        <div class="cmd" style="margin-top:14px"><span class="p">$</span><span>sudo nano /etc/oma-stack/openbot.env</span></div>
+      </div>
+      <div class="card"><h3>Then, look</h3>
+        <p>One command tells you the state of the whole stack and what needs you.</p>
+        <div class="cmd" style="margin-top:14px"><span class="p">$</span><span>oma doctor</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq" class="faq">
+    <div class="head">
+      <div class="kicker">questions</div>
+      <h2>The obvious ones.</h2>
+    </div>
+    <details><summary>Why not just use GitHub Actions?</summary>
+      <p>Because on this account it cannot start. Hosted jobs sit there forever and private-repo
+         workflows never even register — a billing lock, not a configuration problem. oma-stack
+         does not work around the lock; it moves the execution to hardware you control while
+         leaving your git workflow untouched.</p></details>
+    <details><summary>Is the mirror going to fight with my branches?</summary>
+      <p>No. It clones one-way from GitHub and force-pushes only the mirror's own branches. Your
+         working copies on Forgejo are yours to push to; the mirror never touches them.</p></details>
+    <details><summary>What happens if the USB disk is not plugged in?</summary>
+      <p>The backup timer skips itself and the healthcheck reports WARN. Nothing else notices —
+         the tracker, the mirror and CI all live on the internal SSD by design.</p></details>
+    <details><summary>Can the agents merge things on their own?</summary>
+      <p>No, and that is enforced, not promised. The bridge can run an agent and write its answer
+         to the outbox; it never merges, deploys, or changes a credential. Every handoff is
+         recorded in the audit log and waits for a human.</p></details>
+    <details><summary>Do I need the tailnet to use oma-stack?</summary>
+      <p>No. Tailscale is how your other four devices reach the box, and it is optional. Without
+         it everything still runs on localhost and the LAN exactly as before.</p></details>
+  </section>
+
+  <footer>
+    <span class="logo"><span class="mark">o</span><span>oma<b>·</b>stack</span></span>
+    <span>MIT licensed · built for one operator</span>
+    <span class="sp">
+      <a href="https://github.com/MartinMayday/oma-stack">github</a> ·
+      <a href="https://github.com/MartinMayday/oma-stack/blob/main/docs/RUNBOOK.md">runbook</a> ·
+      <a href="https://github.com/MartinMayday/oma-stack/blob/main/docs/DEPLOY.md">deploy</a> ·
+      v1.1.0
+    </span>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -3,7 +3,7 @@
 The bridge is one process with two jobs.
 
 ```
-OpenBot ──AG-UI/SSE──► bridge ──stdin──► qoder / glm / minimax
+OpenBot ──AG-UI/SSE──► bridge ──stdin/argv──► qoder → glm → minimax
                             │
                             └── watches the handoff inbox, writes answers
                                 to the outbox, logs to audit.log
@@ -23,14 +23,15 @@ follows it.
 ```json
 {
   "default": "qoder",
+  "chain": ["qoder", "glm", "minimax", "echo"],
   "agents": [
     {
       "name": "qoder",
-      "description": "Primary engineer agent.",
-      "command": ["hermes", "run", "--agent", "qoder"],
+      "description": "Primary engineer agent — the Qoder CLI.",
+      "command": ["qoder", "-p", "--no-session-persistence", "{prompt}"],
       "cwd": "/home/martin/agent-library",
       "timeout": 1800,
-      "prompt_mode": "stdin"
+      "prompt_mode": "argv"
     }
   ]
 }
@@ -44,6 +45,8 @@ follows it.
 | `timeout` | seconds before the run is abandoned |
 | `prompt_mode` | `stdin` (default), `arg`, or `argv` |
 | `env` | extra environment for the agent |
+| `chain` | the routing order — see §3 |
+| `default` | the agent that answers first |
 
 `prompt_mode`:
 
@@ -65,6 +68,25 @@ After editing it:
 sudo systemctl restart oma-agent-bridge.service
 ```
 
+### The commands that are already proven
+
+The three real agents are the ones this box already has, and their commands
+come from the agent-library's own receipts rather than from guesswork:
+
+| Agent | Command | Evidence in agent-library |
+|---|---|---|
+| `qoder` | `qoder -p --no-session-persistence "<prompt>"` | `catalogs/skills/canonical/qoder-bridge/SKILL.md:57` |
+| `glm` | `claude -p "<prompt>"` (Claude Code on `zai/glm-5.3`) | `sessions/labs/staging/WI-006-smart-ai-router-angr8/Cases/angr8-003-lang-gate-router/ops/VERIFICATION.md:100` |
+| `minimax` | `codex exec --skip-git-repo-check -m minimax-io/MiniMax-M3.1-Flash "<prompt>"` | `…/receipts/2026-11-07-upgrade-v250.md:32` |
+
+The installer checks which of those binaries are on the PATH, **disables the
+entries it cannot run** (the entry keeps its name and gains a
+`disabled_reason`), and picks the first runnable agent as the default. An
+agent that is not installed is a normal state, not an error.
+
+One caveat worth keeping in view: `qoder -p` can exit 0 on an error, so the
+exit code alone is not proof that the agent did the work.
+
 ---
 
 ## 2. The AG-UI endpoint
@@ -85,9 +107,16 @@ The endpoint speaks AG-UI over SSE:
 | `RUN_STARTED` | the run began |
 | `TEXT_MESSAGE_START` | the answer begins |
 | `TEXT_MESSAGE_CONTENT` | one chunk of the answer (`delta`) |
+| `CUSTOM` (`name: heartbeat`) | the agent is working but has said nothing yet |
 | `TEXT_MESSAGE_END` | the answer ends |
-| `RUN_FINISHED` | the run ended (`result` holds the whole answer) |
+| `RUN_FINISHED` | the run ended (`result` holds the whole answer, `agent` names who answered) |
 | `RUN_ERROR` | the agent failed; `message` says why |
+
+The heartbeat matters more than it looks. OpenBot ends a turn when the
+stream says nothing for `AGENT_STALL_TIMEOUT_MS` (the kit raises it to five
+minutes; upstream's default is one). A CLI agent is silent for the whole
+model latency, so the bridge sends a `CUSTOM` event every 15 seconds while
+it waits. Turn it off with `AGENT_BRIDGE_HEARTBEAT_SECONDS=0`.
 
 Try it without OpenBot:
 
@@ -97,11 +126,34 @@ curl -N -X POST http://127.0.0.1:8765/ag-ui/echo \
   -d '{"threadId":"t1","runId":"r1","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-### Why the allowlist matters
+### Who may call the bridge
 
-OpenBot will only be pointed at an AG-UI agent whose host is on an exact-match
-allowlist — no wildcards, no suffixes, and a URL is refused at startup. The
-installer fills it in:
+The bridge binds `0.0.0.0`, because the OpenBot container reaches it
+through the Docker bridge gateway. That also puts it on the LAN, so every
+request is checked: the **peer address of the socket** — never a
+forwarded header, which anybody can write — has to be on the allowlist.
+
+```
+127.0.0.1/32    your own tools
+::1/128        the same over IPv6
+172.16.0.0/12  docker networks (the OpenBot container)
+100.64.0.0/10  the tailnet (only if you publish the bridge over it)
+```
+
+Anything else gets `403 {"error":"forbidden"}`. The LAN is deliberately
+absent, so a device on the wifi cannot run your agents. Change the list in
+`/etc/oma-stack/host.env` (`AGENT_BRIDGE_ALLOWED_IPS`) and restart the
+bridge.
+
+### Why the allowlist in OpenBot matters
+
+`AGENT_ENDPOINT_ALLOWED_HOSTS` lists the **private addresses an agent may
+be registered at**. It is not a restriction on public addresses. The format
+is `host` or `host:port`, comma separated, with no scheme, no path and no
+wildcards — a URL or a `*` there stops OpenBot from starting, naming the
+entry. The match is exact against the hostname of the registered URL.
+
+The installer fills it in:
 
 ```
 AGENT_ENDPOINT_ALLOWED_HOSTS=host.docker.internal:8765,172.17.0.1:8765
@@ -115,12 +167,52 @@ address that name resolves to. Add more by hand in
 sudo systemctl restart oma-openbot.service
 ```
 
+The agent URL you register in OpenBot has to use one of those names:
+
+```
+http://host.docker.internal:8765/ag-ui/qoder
+```
+
+Inside the container `127.0.0.1` is the container, not this machine, so a
+loopback URL can never reach the bridge.
+
 The image runs in production mode, where `AGENT_COMPUTER_ALLOW_PRIVATE_HOSTS`
 is refused. The allowlist is the supported way to name a private agent.
 
 ---
 
-## 3. The handoff queue
+## 3. The routing chain
+
+The registry carries a `chain`. The default agent answers first; when it
+fails, the next one takes over, and so on. The order is
+`qoder → glm → minimax → echo` — `echo` is `/bin/cat`, and it is the proof
+that the bridge works at all.
+
+The chain is **serial**, not a fan-out: this box has two cores and 8 GB of
+RAM, and two model calls at once starve each other.
+
+Every answer says who produced it:
+
+```json
+{"type":"RUN_FINISHED","threadId":"t1","runId":"r1","result":"…","agent":"glm"}
+```
+
+`agent` is the agent that actually answered, which may not be the one that
+was asked for. When an agent fails, the handoff audit line records the
+fallback as well:
+
+```
+2026-11-11T19:04:12Z case=WI-014-rotate-the-token agent=qoder ok=false
+  (answered by 'glm' after 'qoder' failed)
+```
+
+A request for an agent the registry does not know is refused with `404`
+and the list of names that do exist. A request for an agent that is known
+but not runnable falls through the chain instead of failing.
+
+---
+
+## 4. The handoff queue
 
 ```
 /var/lib/oma-stack/handoff/
@@ -173,7 +265,7 @@ curl -X POST http://127.0.0.1:8765/handoff \
 
 ---
 
-## 4. Wiring a real agent
+## 5. Wiring a real agent
 
 The bridge runs a program. It does not care which one, as long as it reads
 the prompt and writes the answer to stdout.
@@ -182,11 +274,11 @@ For an agent that takes a prompt as an argument:
 
 ```json
 {
-  "name": "qoder",
-  "command": ["/home/martin/.local/bin/qoder-cli", "chat"],
+  "name": "glm",
+  "command": ["claude", "-p", "{prompt}"],
   "cwd": "/home/martin/agent-library",
   "timeout": 1800,
-  "prompt_mode": "arg"
+  "prompt_mode": "argv"
 }
 ```
 
@@ -194,10 +286,10 @@ For one that reads stdin:
 
 ```json
 {
-  "name": "qoder",
-  "command": ["hermes", "run", "--agent", "qoder"],
-  "cwd": "/home/martin/agent-library",
-  "timeout": 1800,
+  "name": "echo",
+  "command": ["/bin/cat"],
+  "cwd": "/tmp",
+  "timeout": 60,
   "prompt_mode": "stdin"
 }
 ```
@@ -207,7 +299,7 @@ credentials are the ones it expects.
 
 ---
 
-## 5. Where the agents come from
+## 6. Where the agents come from
 
 `agent-library` carries ~200 Hermes personas under
 `catalogs/agents/bot-persona/{team,specialist,dark-factory}`. To install
@@ -230,7 +322,7 @@ and re-run `sudo /opt/oma-stack/components/tooling/install-tooling.sh`.
 
 ---
 
-## 6. The boundary
+## 7. The boundary
 
 | The bridge does | The bridge does not |
 |---|---|

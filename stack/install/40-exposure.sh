@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # 40-exposure.sh — decide how the MacBook is reachable.
 #
-#   none      LAN only. Forgejo on http://<lan-ip>:3000. Simplest, safest.
-#   tailscale tailnet only. Best default if the laptop moves between networks.
-#   caddy     public https on your own domain. Needs DNS + ports 80/443 open.
+#   tailnet  127.0.0.1 only.  The tailnet component publishes it at
+#            https://<host>.<tailnet>.ts.net/.  Nothing on the LAN.
+#   none     127.0.0.1 only and nothing publishes it.  This box only.
+#   lan      0.0.0.0, reachable at http://<lan-ip>:3000/ from the LAN.
+#   caddy    public https on your own domain.  Needs DNS + ports 80/443 open.
 #
-# Nothing here is exposed to the internet by default. Forgejo is reachable on
-# the LAN either way (it binds 127.0.0.1; this script opens the front door).
+# Nothing here is exposed to the internet by default, and the default keeps
+# the box off the LAN too: the tailnet is the way in.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/_lib.sh"
@@ -14,52 +16,53 @@ source "${HOST_ENV}"
 
 need_root "$@"
 
+# `tailscale` was the old name of `tailnet`.
+EXPOSE_MODE="${EXPOSE_MODE/tailscale/tailnet}"
+
+set_http_addr() {
+  sed -i "s|^HTTP_ADDR = .*|HTTP_ADDR = ${1}|" /etc/forgejo/app.ini
+}
+
 case "${EXPOSE_MODE}" in
   none)
-    log "EXPOSE_MODE=none — LAN only"
-    # Bind on all interfaces so the LAN can reach it.
-    sed -i "s|^HTTP_ADDR = .*|HTTP_ADDR = 0.0.0.0|" /etc/forgejo/app.ini
+    log "EXPOSE_MODE=none — this box only"
+    # Loopback only, and nothing publishes it.
+    set_http_addr 127.0.0.1
+    sed -i "s|^ROOT_URL = .*|ROOT_URL = http://127.0.0.1:${FORGEJO_PORT:-3000}/|" /etc/forgejo/app.ini
+    sed -i "s|^DOMAIN = .*|DOMAIN = 127.0.0.1|" /etc/forgejo/app.ini
+    systemctl restart forgejo.service
+    note "Forgejo answers on http://127.0.0.1:${FORGEJO_PORT:-3000} and nowhere else"
+    note "To open it up later: set EXPOSE_MODE in host.env and re-run this script"
+    ;;
+
+  lan)
+    log "EXPOSE_MODE=lan — reachable from the LAN"
+    # Bind on all interfaces so the LAN can reach it.  This is the one mode
+    # that puts Forgejo where other devices on the network can get to it.
+    set_http_addr 0.0.0.0
     ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     if [[ -n "$ip" ]]; then
-      sed -i "s|^ROOT_URL = .*|ROOT_URL = http://${ip}:3000/|" /etc/forgejo/app.ini
+      sed -i "s|^ROOT_URL = .*|ROOT_URL = http://${ip}:${FORGEJO_PORT:-3000}/|" /etc/forgejo/app.ini
       sed -i "s|^DOMAIN = .*|DOMAIN = ${ip}|" /etc/forgejo/app.ini
       sed -i "s|^SSH_DOMAIN = .*|SSH_DOMAIN = ${ip}|" /etc/forgejo/app.ini
     fi
     systemctl restart forgejo.service
-    note "Forgejo is at http://${ip:-<lan-ip>}:3000 from the LAN"
+    note "Forgejo is at http://${ip:-<lan-ip>}:${FORGEJO_PORT:-3000} from the LAN"
     note "SSH is at ssh://git@${ip:-<lan-ip>}:2222"
-    note "To open it up later: set EXPOSE_MODE in host.env and re-run this script"
+    note "To close it again: set EXPOSE_MODE=tailnet or none and re-run this script"
     ;;
 
-  tailscale)
-    log "EXPOSE_MODE=tailscale"
-    pkg_install tailscale
-    systemctl enable --now tailscaled
-
-    if ! tailscale status >/dev/null 2>&1; then
-      note "tailscale is not logged in yet. Run:"
-      note "  sudo tailscale up"
-      note "  (it prints a login URL — open it, then re-run this script)"
-      exit 0
-    fi
-
-    TS_NAME=$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')
-    [[ -n "$TS_NAME" ]] || { warn "could not read the tailscale hostname"; exit 1; }
-    ok "tailnet name: ${TS_NAME}"
-
-    tailscale serve --bg --https=443 "http://127.0.0.1:3000" || \
-      warn "tailscale serve failed (older CLI: 'tailscale serve 3000')"
-    ok "Forgejo served at https://${TS_NAME}"
-
-    # The Forgejo config must advertise the same URL or links break, and it
-    # should only listen on loopback because tailscale proxies to it.
-    sed -i "s|^HTTP_ADDR = .*|HTTP_ADDR = 127.0.0.1|" /etc/forgejo/app.ini
-    sed -i "s|^ROOT_URL = .*|ROOT_URL = https://${TS_NAME}/|" /etc/forgejo/app.ini
-    sed -i "s|^DOMAIN = .*|DOMAIN = ${TS_NAME}|" /etc/forgejo/app.ini
-    sed -i "s|^SSH_DOMAIN = .*|SSH_DOMAIN = ${TS_NAME}|" /etc/forgejo/app.ini
+  tailnet)
+    log "EXPOSE_MODE=tailnet — published on the tailnet"
+    # Forgejo listens on loopback only; tailscaled proxies the tailnet
+    # HTTPS endpoint to it.  The tailnet component owns the publishing and
+    # rewrites ROOT_URL once the node has a name, so this only sets the
+    # provisional value.
+    set_http_addr 127.0.0.1
+    sed -i "s|^ROOT_URL = .*|ROOT_URL = http://127.0.0.1:${FORGEJO_PORT:-3000}/|" /etc/forgejo/app.ini
     systemctl restart forgejo.service
-    ok "app.ini updated to advertise https://${TS_NAME}"
-    note "Remember to update FORGEJO_DOMAIN in host.env to: ${TS_NAME}"
+    note "Forgejo listens on 127.0.0.1:${FORGEJO_PORT:-3000} only"
+    note "The tailnet publishes it once you are logged in:  sudo oma serve refresh"
     ;;
 
   caddy)
@@ -69,10 +72,10 @@ case "${EXPOSE_MODE}" in
     pkg_install caddy
     cat >/etc/caddy/Caddyfile <<CADDY
 ${FORGEJO_DOMAIN_CADDY} {
-  reverse_proxy 127.0.0.1:3000
+  reverse_proxy 127.0.0.1:${FORGEJO_PORT:-3000}
 }
 CADDY
-    sed -i "s|^HTTP_ADDR = .*|HTTP_ADDR = 127.0.0.1|" /etc/forgejo/app.ini
+    set_http_addr 127.0.0.1
     sed -i "s|^ROOT_URL = .*|ROOT_URL = https://${FORGEJO_DOMAIN_CADDY}/|" /etc/forgejo/app.ini
     sed -i "s|^DOMAIN = .*|DOMAIN = ${FORGEJO_DOMAIN_CADDY}|" /etc/forgejo/app.ini
     sed -i "s|^SSH_DOMAIN = .*|SSH_DOMAIN = ${FORGEJO_DOMAIN_CADDY}|" /etc/forgejo/app.ini
@@ -82,6 +85,6 @@ CADDY
     ;;
 
   *)
-    die "unknown EXPOSE_MODE='${EXPOSE_MODE}' (none|tailscale|caddy)"
+    die "unknown EXPOSE_MODE='${EXPOSE_MODE}' (none|tailnet|lan|caddy)"
     ;;
 esac

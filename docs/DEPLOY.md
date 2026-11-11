@@ -50,17 +50,28 @@ The installer lands in `/opt/oma-stack` and writes the one config file to
 4. **GitHub runner** — this MacBook as a self-hosted runner for every repo
    the account owns. This is what keeps public-repo CI alive while the
    account is billing-locked.
-5. **exposure** — LAN only by default. `EXPOSE_MODE` can switch it to
-   Tailscale or Caddy.
+5. **exposure** — loopback only by default, published on the tailnet.
+   `EXPOSE_MODE` can switch it to the LAN (`lan`) or to Caddy (`caddy`).
 6. **always-on** — the lid switch is ignored, suspend is blocked, Docker is
    capped so the desktop keeps its memory.
 7. **timers** — mirror, issue snapshot, healthcheck.
 8. **backup** — dated snapshots to the USB disk, every 6 hours, 7 kept.
 9. **mirrors** — the GitHub repos are cloned into Forgejo.
-10. **OpenBot** — the container, its secrets, its systemd unit.
+10. **OpenBot** — the container, its secrets, its systemd unit, and the
+    hourly worker that fires the routines and sweeps staged attachments.
 11. **agent bridge** — the registry, the handoff queue, its systemd unit.
 12. **tooling** — the small CLI helpers the agents expect.
 13. **healthcheck** — one report for the whole stack.
+14. **tailnet** — Tailscale, the access policy template, and the publish of
+    Forgejo and the bridge on your private tailnet.
+
+After the install, `oma` is on the PATH:
+
+```bash
+oma status      # one screen: services, timers, endpoints
+oma doctor      # what is broken, and what to do about it
+oma open        # the URLs, copy-pasteable
+```
 
 ---
 
@@ -74,7 +85,7 @@ Two things are printed once and cannot be recovered:
 If you missed the password, reset it:
 
 ```bash
-sudo -u forgejo forgejo --config /etc/forgejo/app.ini \
+sudo forgejo --config /etc/forgejo/app.ini \
   admin user change-password --username ci-admin --password 'new-password'
 ```
 
@@ -86,13 +97,14 @@ sudo -u forgejo forgejo --config /etc/forgejo/app.ini \
 sudo nano /etc/oma-stack/openbot.env
 ```
 
-| Key | Where it comes from |
-|---|---|
-| `CPK_INTELLIGENCE_API_KEY` | `npx --yes copilotkit@latest login` → `npx --yes copilotkit@latest project select` |
-| `OPENAI_API_KEY` | your model provider (or `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) |
+| Key | Where it comes from | If it is missing |
+|---|---|---|
+| `CPK_INTELLIGENCE_API_KEY` | `npx --yes copilotkit@latest login` → `npx --yes copilotkit@latest project select` | OpenBot does not start |
+| `OPENAI_API_KEY` | your model provider (or `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) | only OpenBot's own Bots go without a model — and the all-in-one image ships none, so this is a note, not a blocker |
 
-Without the first, OpenBot does not start. Without the second, the Bots have
-no model to spend.
+Without the first, OpenBot does not start. Without the second, the agents
+registered from the bridge still answer; the model key is what OpenBot's
+own Bots would spend.
 
 Then:
 
@@ -132,12 +144,17 @@ http://host.docker.internal:8765/ag-ui/echo
 proves the whole path works. Replace it with a real agent once the registry
 is filled in. See [AGENT-BRIDGE.md](AGENT-BRIDGE.md).
 
+The host in that URL has to be one of the names in
+`AGENT_ENDPOINT_ALLOWED_HOSTS` — `host.docker.internal:8765` is put there
+by the installer. A URL in the allowlist, or a wildcard, stops OpenBot from
+starting.
+
 ---
 
 ## 6. Check it
 
 ```bash
-sudo /opt/oma-stack/verify/healthcheck.sh
+oma doctor
 ```
 
 Wanted:
@@ -157,18 +174,33 @@ A **WARN** about the USB disk is expected when the disk is not plugged in.
 
 ---
 
-## 7. Expose it (optional)
+## 7. Your devices on the tailnet
 
-```bash
-sudo nano /etc/oma-stack/host.env      # EXPOSE_MODE=tailscale
-sudo /opt/oma-stack/stack/install/40-exposure.sh
-```
+The install puts the box on a private Tailscale tailnet and publishes two
+services on it:
 
-Tailscale needs the `tailscale` package and a tailnet. Caddy needs a domain
-and ports 80/443 open.
+| | URL | How |
+|---|---|---|
+| Forgejo | `https://oma.<tailnet>.ts.net/` | `tailscale serve` on 443 |
+| agent bridge | `https://oma.<tailnet>.ts.net:9443/` | `tailscale serve` on 9443 |
+| OpenBot | `http://<100.x.y.z>:3001` | published on the tailnet address |
 
-OpenBot and the bridge are **not** exposed by that script: OpenBot's port is
-published on loopback on purpose, and the bridge is an internal seam.
+OpenBot is the odd one out: in single-user mode it refuses to start when
+it is given a public address, and a `.ts.net` name is public to it while a
+`100.x` tailnet address is private. The tailnet transport is encrypted
+anyway.
+
+The access policy for the tailnet is written to
+`/etc/oma-stack/tailnet-policy.json`. Paste it into the Tailscale admin
+console. Saving it turns the tailnet from allow-all into deny-by-default,
+and only the ports it lists stay reachable.
+
+Install the Tailscale app on the phone, the tablet, the Mac Studio and the
+Proxmox node, sign in with the same account, and they are in. Nothing of
+this is on the public internet, and nothing of it is on the LAN.
+
+`oma serve refresh` re-publishes everything after a change — a new tailnet
+address, a new name, a changed policy.
 
 ---
 

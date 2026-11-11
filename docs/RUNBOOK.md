@@ -3,10 +3,12 @@
 One command tells you whether the box is healthy:
 
 ```bash
-sudo /opt/oma-stack/verify/healthcheck.sh
+oma doctor
 ```
 
-Everything else in this document is what you do when it is not.
+It runs the healthcheck and adds the parts a script cannot judge: the
+secrets, the agents, the tailnet. Everything else in this document is what
+you do when it is not.
 
 | Symptom | Go to |
 |---|---|
@@ -17,7 +19,8 @@ Everything else in this document is what you do when it is not.
 | An agent doesn't answer / no handoff result | §5 |
 | The USB disk is missing | §6 |
 | The box won't stay awake | §7 |
-| Something needs to be undone | §8 |
+| A device cannot reach the box | §8 |
+| Something needs to be undone | §9 |
 
 ---
 
@@ -30,8 +33,10 @@ Everything else in this document is what you do when it is not.
 | Agent registry | `/etc/oma-stack/agents.json` |
 | Installed code | `/opt/oma-stack/` |
 | Forgejo data (DB + repos) | `/var/lib/forgejo/` |
-| OpenBot data | `/var/lib/forgejo/openbot/` + docker volume `oma-openbot-data` |
+| OpenBot data | `/var/lib/forgejo/openbot/` + docker volumes `oma-openbot-data`, `oma-openbot-workspace`, `oma-openbot-profiles` |
 | Handoff queue | `/var/lib/oma-stack/handoff/{inbox,outbox,done,failed}` |
+| Tailnet policy template | `/etc/oma-stack/tailnet-policy.json` |
+| The canonical `tailscale up` | `/etc/oma-stack/tailscale-up.cmd` |
 | Health log | `/var/log/oma-stack-health.log` |
 | Backups | `/mnt/usb/backups/` |
 
@@ -130,14 +135,15 @@ sudo docker compose -f /opt/oma-stack/components/openbot/docker-compose.yml ps
 sudo docker compose -f /opt/oma-stack/components/openbot/docker-compose.yml logs --tail=80 openbot
 ```
 
-The container needs **four** things. The healthcheck names the missing one.
+The container needs **three** things to start, and a fourth for OpenBot's
+own Bots. The healthcheck names the missing one.
 
 | Missing | Symptom in the log | Fix |
 |---|---|---|
 | `CPK_INTELLIGENCE_API_KEY` | refuses to start | `npx --yes copilotkit@latest login` then `project select`, or `local connect` |
 | `KEY_ENCRYPTION_KEY` | refuses to start | `openssl rand -base64 32` into `/etc/oma-stack/openbot.env` |
 | `INTELLIGENCE_API_URL` / `INTELLIGENCE_GATEWAY_WS_URL` | connects then drops | Copy both values from the same `copilotkit` login |
-| a model key (`OPENAI_API_KEY` etc.) | starts, the Bot cannot answer | Add the key for the provider in `OPENBOT_MODEL_PROVIDER` |
+| a model key (`OPENAI_API_KEY` etc.) | starts, the Bot cannot answer | Only OpenBot's own Bots need it, and the all-in-one image ships none. The agents registered from the bridge answer anyway |
 
 After editing `/etc/oma-stack/openbot.env`:
 
@@ -146,12 +152,21 @@ sudo systemctl restart oma-openbot.service
 curl -fsS http://127.0.0.1:3001/health
 ```
 
-The browser reaches the Bots at `http://127.0.0.1:3001` (or the tailnet name
-if you changed `OPENBOT_BIND`).
+The browser reaches the Bots at `http://127.0.0.1:3001`, and over the
+tailnet at `http://<100.x.y.z>:3001`.
 
 **`OPENBOT_SINGLE_USER=true` means anyone who can reach the port is an
 administrator.** Keep the bind on `127.0.0.1` unless you have understood the
 consequences.
+
+Four more refusals, all of them upstream's own boot checks:
+
+| The log says | Cause | Fix |
+|---|---|---|
+| `AGENT_ENDPOINT_ALLOWED_HOSTS entry "…" must be a host…` | A URL, a path or a `*` is in the allowlist | Use `host` or `host:port` only — `host.docker.internal:8765` |
+| `OPENBOT_SINGLE_USER … cannot be combined with an address the public internet reaches` | A `.ts.net` name is in `TRUSTED_ORIGINS`, `OPENBOT_APP_URL` or `OPENBOT_PUBLIC_URL` | Use the tailnet **address** (`http://100.x.y.z:3001`), not the name. See [TAILNET.md](TAILNET.md) |
+| `AGENT_COMPUTER_POLICY must be valid JSON` | The policy was edited into something the server cannot parse | Restore the line from `components/openbot/install-openbot.sh` |
+| `AGENT_STALL_TIMEOUT_MS must be a whole number…` | The value is not a number of milliseconds | Whole milliseconds, or `0` to switch the watchdog off |
 
 ---
 
@@ -166,9 +181,11 @@ journalctl -u oma-agent-bridge -n 80 --no-pager
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/agents` shows an agent with no command | The registry entry is a placeholder | Fill in `command` in `/etc/oma-stack/agents.json`, then `sudo systemctl restart oma-agent-bridge` |
-| The endpoint returns `RUN_ERROR` | The agent binary is missing or the command is wrong | Test the command by hand as the bridge user |
-| OpenBot says "host not allowed" | The allowlist is exact-match | Add the host to `OPENBOT_AGENT_ENDPOINT_ALLOWED_HOSTS` in `/etc/oma-stack/openbot.env`, restart OpenBot |
+| `/agents` shows an agent with no command | The binary is not on the PATH, or the entry is a placeholder | Install the CLI, or fill in `command` in `/etc/oma-stack/agents.json`, then `sudo systemctl restart oma-agent-bridge` |
+| The endpoint returns `RUN_ERROR` | Every agent in the chain failed | The message names each one: `qoder: … ; glm: …` |
+| The answer came from an agent you did not ask for | The chain fell through | The reply carries `"agent": "<who answered>"`; the audit log names the fallback |
+| `403 {"error":"forbidden"}` | The caller is not on the IP allowlist | Add its address to `AGENT_BRIDGE_ALLOWED_IPS` in `host.env`, or use `127.0.0.1` |
+| OpenBot says "host not allowed" | The allowlist is exact-match | Add the host to `AGENT_ENDPOINT_ALLOWED_HOSTS` in `/etc/oma-stack/openbot.env`, restart OpenBot |
 | A case sits in `inbox/` and never moves | The bridge user cannot read the inbox | `sudo chown -R <bridge-user> /var/lib/oma-stack/handoff` |
 | The case is in `failed/` | The agent exited non-zero | Read `<case>.result.md` next to it and `audit.log` |
 
@@ -236,7 +253,30 @@ to `performance` for CI bursts, and back to `powersave` afterwards.
 
 ---
 
-## 8. Undo
+## 8. A device cannot reach the box
+
+```bash
+oma serve show          # what is published
+oma serve refresh       # publish it again
+tailscale status        # is the node logged in
+```
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The phone cannot open Forgejo | The phone is not on the tailnet | Install the Tailscale app and sign in with the same account |
+| The phone is on the tailnet and still refused | The access policy denies the port | The policy is deny-by-default once saved. Check it in the admin console — the template is `/etc/oma-stack/tailnet-policy.json` |
+| `tailscale serve` hangs | `--bg` is missing | The kit always passes it; if you ran it by hand, use `tailscale serve --bg --https=443 http://127.0.0.1:3000` |
+| The node key expired | Untagged nodes expire every 180 days | `sudo tailscale up --force-reauth`, or "Temporarily extend key" in the admin console |
+| The tailnet name does not resolve | `--accept-dns=0` leaves the OS resolver alone | Check with `tailscale dns query oma.<tailnet>.ts.net`; set `TAILSCALE_ACCEPT_DNS=1` and re-run `tailscale up` |
+| OpenBot is not reachable on the tailnet address | The publish file is missing | `oma serve refresh` writes `components/openbot/docker-compose.override.yml` and restarts OpenBot |
+| Forgejo's links point at 127.0.0.1 | `ROOT_URL` was not re-pointed at the tailnet name | `oma serve refresh` rewrites `ROOT_URL`, `DOMAIN` and `SSH_DOMAIN` and restarts Forgejo |
+
+The full tailnet guide, including the per-device install matrix and the key
+expiry procedure, is in [TAILNET.md](TAILNET.md).
+
+---
+
+## 9. Undo
 
 ```bash
 sudo /opt/oma-stack/uninstall.sh           # stop the services, keep the data
@@ -244,7 +284,8 @@ sudo /opt/oma-stack/uninstall.sh --purge   # and delete the data
 ```
 
 `--purge` removes `/etc/oma-stack`, `/var/lib/forgejo`, `/var/lib/oma-stack`
-and the `oma-openbot-data` volume. **GitHub is never touched.**
+and the `oma-openbot-data`, `oma-openbot-workspace` and `oma-openbot-profiles`
+volumes. **GitHub is never touched.**
 
 ---
 

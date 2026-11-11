@@ -10,7 +10,7 @@ name: oma-openbot
 
 services:
   openbot:
-    image: ${OPENBOT_IMAGE:-ghcr.io/copilotkit/openbot:latest}
+    image: ${OPENBOT_IMAGE:-ghcr.io/copilotkit/openbot:v1.0.2}
     container_name: oma-openbot
     restart: unless-stopped
 
@@ -39,6 +39,16 @@ services:
       - "${OPENBOT_VOLUME:-oma-openbot-data}:/var/lib/postgresql"
       # The directory the server writes into (model sign-in files).
       - "${OPENBOT_DATA_DIR:-/var/lib/forgejo/openbot}:/openbot"
+      # Bot workspaces.  Without this every redeploy deletes them.
+      - "${OPENBOT_WORKSPACE_VOLUME:-oma-openbot-workspace}:/workspace"
+      # Browser profiles: the signed-in sessions the Bots keep.
+      # Without this every redeploy logs the Bots out of every site.
+      - "${OPENBOT_PROFILES_VOLUME:-oma-openbot-profiles}:/profiles"
+
+volumes:
+  oma-openbot-data:
+  oma-openbot-workspace:
+  oma-openbot-profiles:
 
     healthcheck:
       test: ["CMD-SHELL", "bun -e \"const r = await fetch('http://127.0.0.1:3001/health'); process.exit(r.ok ? 0 : 1)\""]

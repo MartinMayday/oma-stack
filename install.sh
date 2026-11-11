@@ -21,12 +21,14 @@ DO_OPENBOT=1
 DO_BRIDGE=1
 DO_RUNNERS=1
 DO_TOOLING=1
+DO_TAILSCALE=1
 while (( $# )); do
   case "$1" in
     --no-openbot) DO_OPENBOT=0; shift ;;
     --no-bridge)  DO_BRIDGE=0;  shift ;;
     --no-runner)  DO_RUNNERS=0; shift ;;
     --no-tooling) DO_TOOLING=0; shift ;;
+    --no-tailscale) DO_TAILSCALE=0; shift ;;
     --skip=*)     SKIP="${SKIP},${1#--skip=}"; shift ;;
     --skip)       shift; SKIP="${SKIP},${1:-}"; shift ;;
     *)            die "unknown option: $1" ;;
@@ -48,14 +50,20 @@ run_step() {
 
 need_root
 
+# The banner reads the version from the one file that owns it, so it cannot
+# drift away from the tag.
+OMA_VERSION="$(tr -d '[:space:]' < "${HERE}/VERSION" 2>/dev/null || true)"
+OMA_VERSION="${OMA_VERSION:-unknown}"
+
 chmod +x "${HERE}"/stack/install/*.sh "${HERE}"/stack/mirror/*.sh \
            "${HERE}"/stack/verify/*.sh "${HERE}"/stack/backup/*.sh \
-           "${HERE}"/components/*/*.sh "${HERE}"/verify/*.sh 2>/dev/null || true
+           "${HERE}"/components/*/*.sh "${HERE}"/verify/*.sh \
+           "${HERE}"/bin/oma 2>/dev/null || true
 
 cat <<EOF
 
 =================================================================
-  oma-stack 1.0.0 — Forgejo + CI runner + OpenBot + agent bridge
+  oma-stack ${OMA_VERSION} — Forgejo + CI runner + OpenBot + agent bridge + tailnet
 =================================================================
 EOF
 
@@ -92,7 +100,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. The unified healthcheck
+# 5. The tailnet
+# ---------------------------------------------------------------------------
+if (( DO_TAILSCALE )) && [[ "${ENABLE_TAILSCALE}" == "1" ]]; then
+  run_step 45 "tailnet" "${HERE}/components/tailscale/install-tailscale.sh"
+else
+  warn "skipping the tailnet"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. The oma command
+# ---------------------------------------------------------------------------
+echo
+printf '\033[1;35m########## oma ##########\033[0m\n'
+chmod 0755 "${HERE}/bin/oma"
+ln -sf "${HERE}/bin/oma" /usr/local/bin/oma
+ok "oma is on your PATH: $(command -v oma)"
+
+# ---------------------------------------------------------------------------
+# 7. The unified healthcheck
 # ---------------------------------------------------------------------------
 echo
 printf '\033[1;35m########## health ##########\033[0m\n'
@@ -107,6 +133,7 @@ cat <<EOF
   OpenBot (the agent surface)     : http://127.0.0.1:${OPENBOT_PORT}
   Agent bridge (AG-UI)            : http://127.0.0.1:${AGENT_BRIDGE_PORT}
   GitHub self-hosted runner        : ${GITHUB_RUNNER_NAME}
+  Tailnet name                    : ${TAILSCALE_HOSTNAME}.<your-tailnet>.ts.net
 
   Storage
     internal SSD (hot)             : ${BOOT_DATA}
@@ -114,11 +141,13 @@ cat <<EOF
 
   Next:
     1. Save the Forgejo admin password printed earlier.
-    2. Add the Intelligence key and a model key:
+    2. Add the Intelligence key (a model key is optional):
          sudo nano ${CRED_DIR}/openbot.env
          sudo systemctl restart oma-openbot.service
     3. Put a GitHub PAT (repo scope) in ${GITHUB_TOKEN_FILE}, mode 0600
-    4. Health:  sudo ${HERE}/verify/healthcheck.sh
-    5. Docs:    ${HERE}/docs/RUNBOOK.md
+    4. Finish the tailnet login if it asked for one:  sudo tailscale up
+    5. Paste ${CRED_DIR}/tailnet-policy.json into the Tailscale admin console
+    6. Health:  oma doctor
+    7. Docs:    ${HERE}/docs/RUNBOOK.md
 =================================================================
 EOF

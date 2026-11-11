@@ -65,43 +65,64 @@ else
   NEW_REGISTRY=0
 fi
 
-# The default agent must be one that can actually run.
-DEFAULT="${AGENT_DEFAULT}"
-if python3 - "${AGENT_BRIDGE_REGISTRY}" "${DEFAULT}" <<'PY'
-import json, sys
-path, want = sys.argv[1], sys.argv[2]
+# The default agent must be one that can actually run, and the chain is the
+# order the agents take over in.  An agent whose program is not on the PATH
+# is disabled, so the bridge never offers an endpoint that cannot answer.
+python3 - "${AGENT_BRIDGE_REGISTRY}" "${AGENT_DEFAULT:-auto}" <<'PY'
+import json, os, shutil, sys
+
+path, preferred = sys.argv[1], sys.argv[2]
 raw = json.load(open(path))
-agents = {a.get("name"): a for a in raw.get("agents", [])}
-spec = agents.get(want)
-sys.exit(0 if spec and spec.get("command") else 1)
-PY
-then
-  ok "default agent '${DEFAULT}' is configured"
-else
-  FIRST="$(python3 - "${AGENT_BRIDGE_REGISTRY}" <<'PY'
-import json, sys
-raw = json.load(open(sys.argv[1]))
-for a in raw.get("agents", []):
-    if a.get("command"):
-        print(a.get("name", ""))
-        break
-PY
-)"
-  if [[ -n "${FIRST}" ]]; then
-    python3 - "${AGENT_BRIDGE_REGISTRY}" "${FIRST}" <<'PY'
-import json, sys
-path, first = sys.argv[1], sys.argv[2]
-raw = json.load(open(path))
-raw["default"] = first
+chain = list(raw.get("chain") or [])
+agents = raw.get("agents", [])
+by_name = {a.get("name"): a for a in agents}
+
+disabled = []
+for agent in agents:
+    command = agent.get("command") or []
+    if not command:
+        continue
+    binary = command[0]
+    if shutil.which(binary) is None:
+        agent["command"] = []
+        agent["disabled_reason"] = f"'{binary}' is not on the PATH"
+        disabled.append(agent.get("name", "?"))
+
+def runnable(name):
+    agent = by_name.get(name)
+    return bool(agent and agent.get("command"))
+
+# The default is the first runnable agent in the chain — unless the config
+# names one explicitly and that one can run.
+order = chain or [a.get("name") for a in agents]
+chosen = None
+if preferred and preferred != "auto" and runnable(preferred):
+    chosen = preferred
+else:
+    chosen = next((n for n in order if runnable(n)), None)
+if not chosen:
+    chosen = next((a.get("name") for a in agents if a.get("command")), None)
+
+if chosen:
+    raw["default"] = chosen
+
 json.dump(raw, open(path, "w"), indent=2)
+print("DEFAULT=" + str(raw.get("default")))
+print("DISABLED=" + ",".join(disabled))
 PY
-    warn "default agent '${DEFAULT}' has no command — defaulting to '${FIRST}'"
-    note "fill the command in:  sudo nano ${AGENT_BRIDGE_REGISTRY}"
-  else
-    warn "no agent in the registry has a command yet"
-    note "fill one in:  sudo nano ${AGENT_BRIDGE_REGISTRY}"
-  fi
-fi
+
+DEFAULT="$(python3 -c "
+import json,sys
+print(json.load(open('${AGENT_BRIDGE_REGISTRY}')).get('default',''))
+")"
+ok "default agent: ${DEFAULT:-none}"
+
+DISABLED="$(python3 -c "
+import json,sys
+raw=json.load(open('${AGENT_BRIDGE_REGISTRY}'))
+print(', '.join(a['name'] for a in raw.get('agents',[]) if a.get('disabled_reason')))
+")"
+[[ -z "${DISABLED}" ]] || warn "not runnable on this box: ${DISABLED}"
 
 # The bridge reads the registry AS THE OPERATOR, so the operator must own it.
 # The file lives in a root-owned 0711 directory: the operator can read and
@@ -140,10 +161,12 @@ User=${OPERATOR}
 Group=${OPERATOR}
 WorkingDirectory=${ROOT}
 Environment=PYTHONUNBUFFERED=1
+Environment=AGENT_BRIDGE_HEARTBEAT_SECONDS=${AGENT_BRIDGE_HEARTBEAT_SECONDS:-15}
 ExecStart=${ROOT}/components/agents/bridge.py \\
   --registry ${AGENT_BRIDGE_REGISTRY} \\
   --bind ${AGENT_BRIDGE_BIND} \\
   --port ${AGENT_BRIDGE_PORT} \\
+  --allow-ips ${AGENT_BRIDGE_ALLOWED_IPS} \\
   --handoff-root ${HANDOFF_ROOT} \\
   --inbox ${HANDOFF_WATCH_DIR}
 Restart=on-failure

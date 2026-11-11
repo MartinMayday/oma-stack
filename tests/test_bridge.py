@@ -24,6 +24,95 @@ import bridge  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+class AllowlistTest(unittest.TestCase):
+    """Who is allowed to call the bridge."""
+
+    def test_the_default_list_keeps_the_lan_out(self):
+        nets = bridge.parse_networks(bridge.DEFAULT_ALLOWED_IPS)
+        self.assertTrue(bridge.address_allowed("127.0.0.1", nets))
+        self.assertTrue(bridge.address_allowed("::1", nets))
+        self.assertTrue(bridge.address_allowed("172.18.0.2", nets))   # docker
+        self.assertTrue(bridge.address_allowed("100.101.102.103", nets))  # tailnet
+        self.assertFalse(bridge.address_allowed("192.168.1.42", nets))  # the wifi
+
+    def test_a_bare_address_is_accepted(self):
+        nets = bridge.parse_networks("10.0.0.5")
+        self.assertTrue(bridge.address_allowed("10.0.0.5", nets))
+        self.assertFalse(bridge.address_allowed("10.0.0.6", nets))
+
+    def test_junk_entries_are_ignored(self):
+        nets = bridge.parse_networks("127.0.0.1/32,not-an-ip,,192.168.0.0/24")
+        self.assertEqual(len(nets), 2)
+        self.assertTrue(bridge.address_allowed("192.168.0.9", nets))
+
+    def test_an_empty_list_allows_nobody(self):
+        self.assertFalse(bridge.address_allowed("127.0.0.1", []))
+
+    def test_a_garbled_peer_address_is_refused(self):
+        nets = bridge.parse_networks(bridge.DEFAULT_ALLOWED_IPS)
+        self.assertFalse(bridge.address_allowed("not-an-ip", nets))
+
+    def test_an_ipv4_peer_does_not_match_an_ipv6_network(self):
+        nets = bridge.parse_networks("::1/128")
+        self.assertFalse(bridge.address_allowed("127.0.0.1", nets))
+
+
+# ---------------------------------------------------------------------------
+class ChainTest(unittest.TestCase):
+    """The routing chain: who answers, and who takes over when they fail."""
+
+    def build(self, **kwargs):
+        agents = [
+            bridge.Agent({"name": "qoder", "command": ["/bin/cat"], "cwd": "/tmp"}),
+            bridge.Agent({"name": "glm", "command": ["/bin/cat"], "cwd": "/tmp"}),
+            bridge.Agent({"name": "minimax", "command": ["/bin/cat"], "cwd": "/tmp"}),
+        ]
+        return bridge.Registry(agents, kwargs.get("default", "qoder"),
+                               kwargs.get("chain"))
+
+    def test_the_chain_starts_with_the_default(self):
+        registry = self.build(default="glm", chain=["qoder", "glm", "minimax"])
+        names = [a.name for a in registry.chain_agents()]
+        self.assertEqual(names[0], "glm")
+        self.assertEqual(set(names), {"qoder", "glm", "minimax"})
+
+    def test_the_chain_keeps_its_order(self):
+        registry = self.build(default="qoder",
+                              chain=["qoder", "glm", "minimax"])
+        names = [a.name for a in registry.chain_agents()]
+        self.assertEqual(names, ["qoder", "glm", "minimax"])
+
+    def test_a_name_is_never_repeated(self):
+        registry = self.build(default="qoder", chain=["qoder", "qoder", "glm"])
+        names = [a.name for a in registry.chain_agents()]
+        self.assertEqual(names, ["qoder", "glm"])
+
+    def test_unknown_names_in_the_chain_are_skipped(self):
+        registry = self.build(default="qoder", chain=["nope", "glm"])
+        names = [a.name for a in registry.chain_agents()]
+        self.assertEqual(names, ["qoder", "glm"])
+
+    def test_a_registry_without_a_chain_is_just_the_default(self):
+        registry = self.build(default="glm")
+        names = [a.name for a in registry.chain_agents()]
+        self.assertEqual(names, ["glm"])
+
+    def test_the_chain_is_read_from_the_registry_file(self):
+        import tempfile as tf
+        path = Path(tf.mkdtemp()) / "agents.json"
+        path.write_text(json.dumps({
+            "default": "glm",
+            "chain": ["glm", "minimax"],
+            "agents": [{"name": "glm", "command": ["/bin/cat"]},
+                       {"name": "minimax", "command": ["/bin/cat"]}],
+        }))
+        registry = bridge.Registry.load(path)
+        self.assertEqual(registry.default, "glm")
+        self.assertEqual([a.name for a in registry.chain_agents()],
+                         ["glm", "minimax"])
+
+
+# ---------------------------------------------------------------------------
 class FrontmatterTest(unittest.TestCase):
     def test_plain_scalars(self):
         front, body = bridge.parse_frontmatter(
@@ -177,11 +266,15 @@ class HttpTest(unittest.TestCase):
             bridge.Agent({"name": "echo", "command": ["/bin/cat"], "cwd": "/tmp",
                           "timeout": 30}),
             bridge.Agent({"name": "empty", "command": [], "cwd": "/tmp"}),
-        ], "echo")
+            bridge.Agent({"name": "boom", "command": ["/bin/false"], "cwd": "/tmp",
+                          "timeout": 30}),
+        ], "echo", ["echo", "empty", "boom"])
         bridge.BridgeHandler.registry = registry
         bridge.BridgeHandler.inbox = cls.tmp / "inbox"
         bridge.BridgeHandler.outbox = cls.tmp / "outbox"
         bridge.BridgeHandler.audit_log = cls.tmp / "audit.log"
+        bridge.BridgeHandler.allowed_nets = bridge.parse_networks(
+            bridge.DEFAULT_ALLOWED_IPS)
         bridge.BridgeHandler.logger = staticmethod(lambda msg: None)
         cls.server = bridge.ThreadingHTTPServer(("127.0.0.1", 0), bridge.BridgeHandler)
         cls.server.daemon_threads = True
@@ -232,6 +325,29 @@ class HttpTest(unittest.TestCase):
         status, _ = self.get("/nope")
         self.assertEqual(status, 404)
 
+    def test_a_peer_off_the_allowlist_is_refused(self):
+        original = bridge.BridgeHandler.allowed_nets
+        bridge.BridgeHandler.allowed_nets = bridge.parse_networks("10.99.99.0/24")
+        try:
+            status, body = self.get("/health")
+            self.assertEqual(status, 403)
+            self.assertEqual(json.loads(body)["error"], "forbidden")
+        finally:
+            bridge.BridgeHandler.allowed_nets = original
+
+    def test_a_refused_peer_cannot_run_an_agent(self):
+        original = bridge.BridgeHandler.allowed_nets
+        bridge.BridgeHandler.allowed_nets = bridge.parse_networks("10.99.99.0/24")
+        try:
+            status, body = self.post("/ag-ui/echo", {
+                "threadId": "t", "runId": "r",
+                "messages": [{"id": "m1", "role": "user", "content": "hello"}],
+            })
+            self.assertEqual(status, 403)
+            self.assertNotIn("RUN_STARTED", body)
+        finally:
+            bridge.BridgeHandler.allowed_nets = original
+
     def test_a_run_streams_the_ag_ui_events(self):
         status, body = self.post("/ag-ui/echo", {
             "threadId": "t1",
@@ -256,12 +372,28 @@ class HttpTest(unittest.TestCase):
         status, _ = self.get("/ag-ui/nope")
         self.assertEqual(status, 404)
 
-    def test_an_agent_without_a_command_reports_a_run_error(self):
+    def test_an_agent_without_a_command_falls_through_the_chain(self):
         status, body = self.post("/ag-ui/empty", {
             "messages": [{"role": "user", "content": "x"}],
         })
         self.assertEqual(status, 200)
-        self.assertIn("event: RUN_ERROR", body)
+        self.assertIn("event: RUN_FINISHED", body)
+        self.assertIn('"agent": "echo"', body)
+
+    def test_a_failing_agent_falls_through_the_chain(self):
+        status, body = self.post("/ag-ui/boom", {
+            "messages": [{"role": "user", "content": "x"}],
+        })
+        self.assertEqual(status, 200)
+        self.assertIn("event: RUN_FINISHED", body)
+        self.assertIn('"agent": "echo"', body)
+
+    def test_the_reply_names_the_agent_that_answered(self):
+        status, body = self.post("/ag-ui", {
+            "messages": [{"role": "user", "content": "x"}],
+        })
+        self.assertEqual(status, 200)
+        self.assertIn('"agent": "echo"', body)
 
     def test_a_request_without_a_user_message_is_400(self):
         status, _ = self.post("/ag-ui/echo", {"messages": []})

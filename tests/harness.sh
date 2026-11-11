@@ -91,7 +91,7 @@ ENABLE_OPENBOT="0"
 ENABLE_AGENT_BRIDGE="1"
 ENABLE_TOOLING="0"
 OPENBOT_PORT="3001"
-OPENBOT_IMAGE="ghcr.io/copilotkit/openbot:latest"
+OPENBOT_IMAGE="ghcr.io/copilotkit/openbot:v1.0.2"
 OPENBOT_VOLUME="oma-openbot-data"
 OPENBOT_DATA_DIR="${T}/boot/openbot"
 OPENBOT_SINGLE_USER="true"
@@ -351,6 +351,62 @@ check "the bootstrap exists and parses" bash -n "$ROOT/bootstrap.sh"
 check "the credential dir stays traversable for the bridge" bash -c \
   "! grep -rn 'install -d -m 0700 \"\${CRED_DIR}\"\|install -d -m 0700 \"\$CRED_DIR\"' '$ROOT' --include='*.sh' | grep -q ."
 check "the bridge owns its own registry" grep -q 'chown "\${OPERATOR}" "\${AGENT_BRIDGE_REGISTRY}"' "$ROOT/components/agents/install-agents.sh"
+check "the bridge checks who is calling" grep -q 'allow-ips' "$ROOT/components/agents/bridge.py"
+check "the registry carries a routing chain" jq -e '.chain | length >= 2' "$ROOT/components/agents/agents.json"
+check "the chain starts with the default agent" bash -c \
+  "jq -e '.chain[0] == .default' '$ROOT/components/agents/agents.json'"
+check "the tailnet component is present" test -f "$ROOT/components/tailscale/install-tailscale.sh"
+check "the tailnet publishes with serve, never funnel" bash -c \
+  "! grep -rnE '^[[:space:]]*[^#].*tailscale funnel' '$ROOT' --include='*.sh' --exclude=harness.sh | grep -q ."
+check "the tailnet serves in the background" grep -q 'serve --bg' "$ROOT/components/tailscale/serve-refresh.sh"
+check "the tailnet policy template is valid JSON" jq -e '.grants | length >= 1' "$ROOT/components/tailscale/tailnet-policy.json"
+check "the oma command exists and parses" bash -n "$ROOT/bin/oma"
+check "the landing page exists" test -f "$ROOT/site/index.html"
+
+# --- the OpenBot corrections (upstream-verified) ---------------------------
+check "the computer policy denies on the real attribute" bash -c \
+  "grep -q 'intent == \\\\\"run_command\\\\\"' '$ROOT/components/openbot/install-openbot.sh'"
+check "the computer policy does not deny a tool that does not exist" bash -c \
+  "! grep -q 'computer_shell' '$ROOT/components/openbot/install-openbot.sh'"
+check "the bot workspaces survive a redeploy" grep -q '/workspace' "$ROOT/components/openbot/docker-compose.yml"
+check "the signed-in browser profiles survive a redeploy" grep -q '/profiles' "$ROOT/components/openbot/docker-compose.yml"
+check "the image is pinned, not a moving tag" bash -c \
+  "! grep -rn 'openbot:latest' '$ROOT' --include='*.sh' --include='*.yml' --include='*.env' --exclude=harness.sh | grep -q ."
+check "the stall watchdog is not the 60 second default" bash -c \
+  "! grep -q 'AGENT_STALL_TIMEOUT_MS=60000' '$ROOT/components/openbot/install-openbot.sh'"
+check "the bridge keeps the stream alive while an agent works" grep -q 'heartbeat' "$ROOT/components/agents/bridge.py"
+check "the scheduled worker exists" test -x "$ROOT/components/openbot/openbot-worker.sh"
+check "the installer schedules the worker" grep -q 'oma-openbot-worker.timer' "$ROOT/components/openbot/install-openbot.sh"
+check "forgejo listens on loopback by default" grep -q 'FORGEJO_BIND:-127.0.0.1' "$ROOT/stack/install/10-forgejo.sh"
+check "the tailnet publish of openbot is a separate file" bash -c \
+  "grep -q 'docker-compose.override.yml' '$ROOT/components/tailscale/serve-refresh.sh'"
+
+# --- the packaging ---------------------------------------------------------
+check "the changelog is present" test -f "$ROOT/CHANGELOG.md"
+check "the license is present" test -f "$ROOT/LICENSE"
+check "the security policy is present" test -f "$ROOT/SECURITY.md"
+check "the contributing guide is present" test -f "$ROOT/CONTRIBUTING.md"
+check "the tailnet guide is present" test -f "$ROOT/docs/TAILNET.md"
+check "the decisions are recorded" bash -c "test \$(ls -1 '$ROOT/docs/adr'/*.md | wc -l) -ge 6"
+check "every decision has the full shape" bash -c \
+  "! grep -L '## Alternatives considered' '$ROOT'/docs/adr/*.md | grep -q ."
+check "the clone route is in the README" grep -q 'git clone https://github.com/MartinMayday/oma-stack.git' "$ROOT/README.md"
+
+# --- the version is one number in three places -----------------------------
+check "the version is stated the same way everywhere" bash -c '
+  v=$(tr -d "[:space:]" < '"$ROOT"'/VERSION)
+  grep -q "OMA_VERSION=\"${v}\"" '"$ROOT"'/bin/oma
+  grep -q "__version__ = \"${v}\"" '"$ROOT"'/components/agents/bridge.py
+  grep -q "v${v}" '"$ROOT"'/site/index.html
+'
+
+# --- the box stays off the LAN by default ----------------------------------
+check "forgejo defaults to the tailnet, not the LAN" grep -q 'EXPOSE_MODE="tailnet"' "$ROOT/config/host.env"
+check "the LAN bind is an explicit mode" bash -c \
+  "grep -q 'lan)' '$ROOT/stack/install/40-exposure.sh'"
+check "the default path never binds forgejo to 0.0.0.0" bash -c \
+  "! grep -B3 'HTTP_ADDR = 0.0.0.0' '$ROOT/stack/install/40-exposure.sh' | grep -q 'EXPOSE_MODE=none'"
+check "the tailnet publish follows the exposure mode" grep -q 'SERVE_FORGEJO' "$ROOT/components/tailscale/serve-refresh.sh"
 
 # =============================================================================
 head_ "6. the python tests"

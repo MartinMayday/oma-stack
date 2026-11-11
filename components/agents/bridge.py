@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -41,7 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # AG-UI event names
@@ -49,9 +50,66 @@ __version__ = "1.0.0"
 RUN_STARTED = "RUN_STARTED"
 RUN_FINISHED = "RUN_FINISHED"
 RUN_ERROR = "RUN_ERROR"
+CUSTOM = "CUSTOM"
+
+# OpenBot ends a turn when the agent's stream says nothing for too long, and
+# the silence it measures is the gap between events.  A real agent behind a
+# CLI is silent for the whole model latency, so the bridge sends a heartbeat
+# while it waits.  0 turns the heartbeat off.
+HEARTBEAT_SECONDS = float(os.environ.get("AGENT_BRIDGE_HEARTBEAT_SECONDS", "15") or 15)
 TEXT_MESSAGE_START = "TEXT_MESSAGE_START"
 TEXT_MESSAGE_CONTENT = "TEXT_MESSAGE_CONTENT"
 TEXT_MESSAGE_END = "TEXT_MESSAGE_END"
+
+# ---------------------------------------------------------------------------
+# Who may talk to the bridge
+# ---------------------------------------------------------------------------
+# The bridge binds 0.0.0.0 because the OpenBot container reaches it through
+# the docker gateway.  That would also put it on the LAN, where a stranger
+# could run the operator's agents.  So the bridge checks the peer address of
+# every request and refuses anything that is not on this list.
+#
+#   127.0.0.1/32      the operator's own tools
+#   ::1/128          the same, over IPv6
+#   172.16.0.0/12    docker bridge networks (the OpenBot container)
+#   100.64.0.0/10    the tailnet (tailscaled proxies locally, so this is
+#                    only needed for direct peer-to-peer calls)
+#
+# The peer address is taken from the socket.  A forwarded header is never
+# trusted: that would be a way in for anyone who can reach the port.
+DEFAULT_ALLOWED_IPS = "127.0.0.1/32,::1/128,172.16.0.0/12,100.64.0.0/10"
+
+
+def parse_networks(spec: str) -> List[Any]:
+    """Parse a comma separated list of IPs / CIDRs into networks."""
+    nets: List[Any] = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def address_allowed(address: str, nets: Iterable[Any]) -> bool:
+    """True when the peer address falls inside one of the allowed networks."""
+    nets = list(nets)
+    if not nets:
+        return False
+    try:
+        peer = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    for net in nets:
+        try:
+            if peer in net:
+                return True
+        except TypeError:      # IPv4 peer vs IPv6 network and the other way
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -158,16 +216,21 @@ class Agent:
 
 
 class Registry:
-    def __init__(self, agents: List[Agent], default: Optional[str]):
+    def __init__(self, agents: List[Agent], default: Optional[str],
+                 chain: Optional[List[str]] = None):
         self.agents = agents
         self.default = default or (agents[0].name if agents else None)
+        # The routing chain: which agent answers, and in what order the
+        # others take over when it fails.  It is a list of agent names.
+        self.chain = list(chain or [])
 
     @classmethod
     def load(cls, path: Path) -> "Registry":
         raw = json.loads(path.read_text())
         agents = [Agent(spec) for spec in raw.get("agents", [])]
         default = raw.get("default")
-        return cls(agents, default)
+        chain = list(raw.get("chain") or [])
+        return cls(agents, default, chain)
 
     def get(self, name: Optional[str]) -> Optional[Agent]:
         if not name:
@@ -179,6 +242,28 @@ class Registry:
 
     def names(self) -> List[str]:
         return [a.name for a in self.agents]
+
+    def chain_agents(self) -> List[Agent]:
+        """The chain as agents, skipping the ones that are not registered.
+
+        The default agent always comes first, then the rest of the chain in
+        the order the registry lists it.
+        """
+        ordered: List[Agent] = []
+        seen = set()
+
+        def push(name: Optional[str]) -> None:
+            if not name or name in seen:
+                return
+            agent = self.get(name)
+            if agent is not None:
+                seen.add(name)
+                ordered.append(agent)
+
+        push(self.default)
+        for name in self.chain:
+            push(name)
+        return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -289,12 +374,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
     inbox: Path
     outbox: Path
     audit_log: Path
+    allowed_nets: List[Any] = []
     logger = staticmethod(lambda msg: None)
 
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: D102
         self.logger(f"{self.address_string()} {fmt % args}")
 
     # -- helpers ---------------------------------------------------------
+    def _client_allowed(self) -> bool:
+        """The peer address must be on the allowlist.  No header is trusted."""
+        if not self.allowed_nets:
+            return True
+        return address_allowed(self.client_address[0], self.allowed_nets)
+
+    def _refuse(self) -> None:
+        peer = self.client_address[0]
+        self.logger(f"refused {peer}: not on the allowlist")
+        self._json(403, {
+            "error": "forbidden",
+            "detail": "this address is not allowed to use the bridge",
+        })
+
     def _json(self, code: int, payload: Any) -> None:
         body = json.dumps(payload, indent=2).encode()
         self.send_response(code)
@@ -313,6 +413,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return {}
 
+    def setup(self) -> None:  # noqa: D102
+        super().setup()
+        # The heartbeat thread and the request thread both write to the
+        # socket, so every frame goes through one lock.
+        self._sse_lock = threading.Lock()
+
     def _sse_start(self) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -324,8 +430,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _sse_event(self, event_type: str, data: Dict[str, Any]) -> None:
         payload = json.dumps({"type": event_type, **data})
         chunk = f"event: {event_type}\ndata: {payload}\n\n".encode()
-        self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
-        self.wfile.flush()
+        with self._sse_lock:
+            self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+            self.wfile.flush()
 
     def _sse_end(self) -> None:
         self.wfile.write(b"0\r\n\r\n")
@@ -333,6 +440,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     # -- routes ----------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
+        if not self._client_allowed():
+            self._refuse()
+            return
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/", "/health"):
             self._json(200, {
@@ -347,6 +457,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._client_allowed():
+            self._refuse()
+            return
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path == "/handoff":
             self._handle_handoff()
@@ -364,8 +477,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         run_id = payload.get("runId") or str(uuid.uuid4())
         prompt = last_user_message(payload.get("messages") or [])
 
-        agent = self.registry.get(name)
-        if agent is None:
+        requested = self.registry.get(name)
+        if requested is None and name:
             self._json(404, {"error": "unknown agent", "agent": name,
                              "known": self.registry.names()})
             return
@@ -373,28 +486,83 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "no user message in the request"})
             return
 
+        # The chain: the requested agent first, then the rest of the chain in
+        # order.  A chain that is empty is just the one agent.
+        chain = [requested] if requested else self.registry.chain_agents()
+        if requested:
+            chain += [a for a in self.registry.chain_agents()
+                      if a.name != requested.name]
+
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
         self._sse_start()
         self._sse_event(RUN_STARTED, {"threadId": thread_id, "runId": run_id})
         self._sse_event(TEXT_MESSAGE_START, {"messageId": message_id, "role": "assistant"})
 
         answer_parts: List[str] = []
+        started = time.monotonic()
+        last_output = started
+        output_lock = threading.Lock()
 
         def on_chunk(text: str) -> None:
+            nonlocal last_output
             answer_parts.append(text)
-            self._sse_event(TEXT_MESSAGE_CONTENT, {"messageId": message_id, "delta": text})
+            with output_lock:
+                last_output = time.monotonic()
+                self._sse_event(TEXT_MESSAGE_CONTENT, {"messageId": message_id, "delta": text})
 
+        # The heartbeat.  OpenBot watches the gap between events, and a CLI
+        # agent is silent for the whole model latency, so without this the
+        # turn is cut off before the answer arrives.
+        stop_heartbeat = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop_heartbeat.wait(HEARTBEAT_SECONDS):
+                with output_lock:
+                    if time.monotonic() - last_output < HEARTBEAT_SECONDS:
+                        continue
+                    try:
+                        self._sse_event(CUSTOM, {
+                            "name": "heartbeat",
+                            "value": {
+                                "agent": requested.name if requested else None,
+                                "elapsed": round(time.monotonic() - started, 1),
+                            },
+                        })
+                    except (OSError, ValueError):
+                        return
+
+        if HEARTBEAT_SECONDS > 0:
+            threading.Thread(target=heartbeat, daemon=True).start()
+
+        errors: List[str] = []
+        answered_by: Optional[str] = None
         try:
-            answer = run_agent(agent, prompt, on_chunk)
+            for agent in chain:
+                try:
+                    answer = run_agent(agent, prompt, on_chunk)
+                except AgentError as exc:
+                    errors.append(f"{agent.name}: {exc}")
+                    self.logger(f"agent '{agent.name}' failed: {exc}")
+                    continue
+                answered_by = agent.name
+                break
+            else:
+                raise AgentError("; ".join(errors) or "no agent in the chain could run")
+
             self._sse_event(TEXT_MESSAGE_END, {"messageId": message_id})
             self._sse_event(RUN_FINISHED, {
                 "threadId": thread_id, "runId": run_id, "result": answer,
+                "agent": answered_by,
             })
         except AgentError as exc:
-            self._sse_event(RUN_ERROR, {"message": str(exc), "code": "AGENT_FAILED"})
+            self._sse_event(RUN_ERROR, {
+                "message": str(exc), "code": "AGENT_FAILED",
+                "agent": answered_by,
+            })
         except Exception as exc:  # noqa: BLE001 - never kill the stream
             self._sse_event(RUN_ERROR, {"message": str(exc), "code": "BRIDGE_ERROR"})
         finally:
+            stop_heartbeat.set()
             self._sse_end()
 
     # -- handoff ---------------------------------------------------------
@@ -517,10 +685,30 @@ class HandoffWorker(threading.Thread):
         working = self.done / f"{path.stem}.working.md"
         prompt = build_prompt(front, body)
         collected: List[str] = []
+        # The assignee leads; the chain takes over when it fails, and the
+        # audit log records who actually answered.
+        chain = [agent] + [a for a in self.registry.chain_agents()
+                           if a.name != agent.name]
+        errors: List[str] = []
+        answered_by = ""
         try:
-            answer = run_agent(agent, prompt, collected.append)
+            for candidate in chain:
+                try:
+                    answer = run_agent(candidate, prompt, collected.append)
+                except AgentError as exc:
+                    errors.append(f"{candidate.name}: {exc}")
+                    self.logger(f"agent '{candidate.name}' failed: {exc}")
+                    continue
+                answered_by = candidate.name
+                break
+            else:
+                raise AgentError("; ".join(errors) or "no agent in the chain could run")
+
             self._write_result(case_id, front, body, answer)
-            self._record(case_id, assignee, "ok", f"{len(answer)} chars")
+            note = f"{len(answer)} chars"
+            if answered_by != assignee:
+                note += f" (answered by '{answered_by}' after '{assignee}' failed)"
+            self._record(case_id, answered_by or assignee, "ok", note)
             working.replace(self.done / path.name)
         except AgentError as exc:
             self._write_result(case_id, front, body, f"error: {exc}")
@@ -590,6 +778,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--registry", default="/etc/oma-stack/agents.json")
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--allow-ips", default=DEFAULT_ALLOWED_IPS,
+                        help="comma separated IPs/CIDRs allowed to call the bridge")
     parser.add_argument("--inbox", default="/var/lib/oma-stack/handoff/inbox")
     parser.add_argument("--handoff-root", default="/var/lib/oma-stack/handoff")
     parser.add_argument("--poll", type=int, default=10, help="handoff poll seconds")
@@ -632,6 +822,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     BridgeHandler.inbox = inbox
     BridgeHandler.outbox = outbox
     BridgeHandler.audit_log = audit
+    BridgeHandler.allowed_nets = parse_networks(args.allow_ips)
     BridgeHandler.logger = staticmethod(logger)
 
     worker = None
@@ -656,6 +847,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger(f"agents: {', '.join(registry.names()) or '(none)'}")
     logger(f"default agent: {registry.default or '(none)'}")
     logger(f"handoff inbox: {inbox}")
+    logger(f"allowed clients: {args.allow_ips}")
     try:
         server.serve_forever()
     finally:

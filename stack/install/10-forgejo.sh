@@ -132,9 +132,9 @@ WORK_PATH = ${BOOT_DATA}
 [server]
 PROTOCOL = http
 DOMAIN = ${FORGEJO_DOMAIN}
-ROOT_URL = http://${FORGEJO_DOMAIN}:3000/
-HTTP_ADDR = 0.0.0.0
-HTTP_PORT = 3000
+ROOT_URL = ${FORGEJO_ROOT_URL:-http://${FORGEJO_DOMAIN}:${FORGEJO_PORT}/}
+HTTP_ADDR = ${FORGEJO_BIND:-127.0.0.1}
+HTTP_PORT = ${FORGEJO_PORT}
 DISABLE_SSH = false
 SSH_PORT = 2222
 SSH_LISTEN_PORT = 2222
@@ -244,9 +244,9 @@ ok "forgejo.service.d/storage.conf updated"
 log "starting forgejo"
 systemctl enable --now forgejo.service
 sleep 3
-if wait_http "http://127.0.0.1:3000/api/v1/version" 40; then
-  ok "forgejo is up on http://127.0.0.1:3000"
-  curl -fsS http://127.0.0.1:3000/api/v1/version | sed 's/^/  /' || true
+if wait_http "http://127.0.0.1:${FORGEJO_PORT}/api/v1/version" 40; then
+  ok "forgejo is up on http://127.0.0.1:${FORGEJO_PORT}"
+  curl -fsS http://127.0.0.1:${FORGEJO_PORT}/api/v1/version | sed 's/^/  /' || true
 else
   systemctl status forgejo.service --no-pager -l | tail -30
   die "forgejo did not come up — see the log above"

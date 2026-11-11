@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# oma — the command line for your own AI workshop.
+#
+#   oma doctor          what is broken, and what to do about it
+#   oma status          one screen: services, timers, endpoints
+#   oma open            the URLs, copy-pasteable
+#   oma logs <unit>     follow a log
+#   oma agent list      the agents the bridge can run
+#   oma agent test <n>  run one prompt through one agent
+#   oma handoff ls      the queue
+#   oma handoff put <f> drop a case in the inbox
+#   oma handoff watch   follow the outbox
+#   oma serve           show / refresh the tailnet entry points
+#   oma update          pull the newest kit and reinstall
+#   oma uninstall       take it off
+#
+# It only reads. It never merges, deploys, or touches a credential.
+
+set -euo pipefail
+
+OMA_VERSION="1.1.0"
+OMA_HOME="${OMA_STACK_DIR:-/opt/oma-stack}"
+
+# ---------------------------------------------------------------------------
+# Look for the config the same way every script in the kit does
+# ---------------------------------------------------------------------------
+find_config() {
+  local c
+  for c in "${OMA_CONFIG:-}" \
+           "/etc/oma-stack/host.env" \
+           "${OMA_HOME}/config/host.env"; do
+    [[ -n "$c" && -f "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+CFG="$(find_config || true)"
+[[ -n "${CFG}" ]] || { echo "oma: no config found (expected /etc/oma-stack/host.env)" >&2; exit 1; }
+# shellcheck disable=SC1090
+source "${CFG}"
+
+# ---------------------------------------------------------------------------
+# Brand
+# ---------------------------------------------------------------------------
+BOLD=$'\033[1m'; DIM=$'\033[2m'; EMB=$'\033[1;35m'; GRN=$'\033[1;32m'
+RED=$'\033[1;31m'; YEL=$'\033[1;33m'; CYN=$'\033[1;36m'; RST=$'\033[0m'
+
+banner() {
+  printf '%s' "${EMB}"
+  cat <<'EOF'
+   ___  __  __
+  / _ \|  \/  | ___ _ __  ___    the workshop, on hardware you own
+ | | | | |\/| |/ _ \ '_ \/ _ \   oma-stack
+ | |_| | |  | |  __/ | | |  __/   forgejo · ci · openbot · agents
+  \___/|_|  |_|\___|_| |_|\___|
+EOF
+  printf '%s v%s%s\n' "${RST}" "${OMA_VERSION}" "${DIM}"
+}
+
+die()  { printf '%soma: %s%s\n' "${RED}" "$*" "${RST}" >&2; exit 1; }
+warn() { printf '%soma: %s%s\n' "${YEL}" "$*" "${RST}" >&2; }
+ok()   { printf '%soma: %s%s\n' "${GRN}" "$*" "${RST}"; }
+info() { printf '%s' "${DIM}"; printf '%s\n' "$*"; printf '%s' "${RST}"; }
+head_() { printf '\n%s%s%s\n' "${BOLD}" "$*" "${RST}"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# The tailnet, as it is right now
+# ---------------------------------------------------------------------------
+# The name is not the hostname: it is <host>.<tailnet>.ts.net, and only
+# tailscale knows the tailnet part.  The address is the 100.x one, and it is
+# the address OpenBot is published on.
+tailnet_facts() {
+  local name="" ip=""
+  if have tailscale; then
+    read -r name ip <<EOF
+$(tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(" "); raise SystemExit
+self_ = d.get("Self") or {}
+name = (self_.get("DNSName") or "").rstrip(".")
+ip = ""
+for candidate in self_.get("TailscaleIPs") or []:
+    if ":" not in candidate:
+        ip = candidate
+        break
+print(name, ip)
+' 2>/dev/null || echo " ")
+EOF
+  fi
+  printf '%s %s' "${name}" "${ip}"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_status() {
+  banner
+  head_ "services"
+  local u
+  for u in forgejo.service forgejo-runner.service oma-openbot.service \
+           oma-agent-bridge.service actions.runner.macbook-forge.service; do
+    if systemctl list-unit-files "$u" >/dev/null 2>&1; then
+      if systemctl is-active --quiet "$u"; then
+        printf '  %s●%s %s\n' "${GRN}" "${RST}" "$u"
+      else
+        printf '  %s○%s %s %s(stopped)%s\n' "${YEL}" "${RST}" "$u" "${DIM}" "${RST}"
+      fi
+    fi
+  done
+
+  head_ "timers"
+  systemctl list-timers --no-pager 'oma-*' 2>/dev/null \
+    | sed 's/^ *//' | grep -E 'oma-' | awk '{printf "  %-28s %s\n", $NF, $1}' || true
+
+  head_ "endpoints"
+  printf '  forgejo        %s\n' "${FORGEJO_URL_FOR_DISPLAY}"
+  printf '  openbot        http://127.0.0.1:%s\n' "${OPENBOT_PORT:-3001}"
+  printf '  agent bridge   http://127.0.0.1:%s\n' "${AGENT_BRIDGE_PORT:-8765}"
+  local ts_name ts_ip
+  read -r ts_name ts_ip <<<"$(tailnet_facts)"
+  if [[ -n "${ts_name}" ]]; then
+    printf '  tailnet        https://%s\n' "${ts_name}"
+    printf '  tailnet addr   %s\n' "${ts_ip}"
+  fi
+  printf '\n'
+}
+
+cmd_open() {
+  cat <<EOF
+forgejo        ${FORGEJO_URL_FOR_DISPLAY}
+openbot        http://127.0.0.1:${OPENBOT_PORT:-3001}
+agent bridge   http://127.0.0.1:${AGENT_BRIDGE_PORT:-8765}
+EOF
+  local ts_name ts_ip
+  read -r ts_name ts_ip <<<"$(tailnet_facts)"
+  if [[ -n "${ts_name}" ]]; then
+    cat <<EOF
+
+tailnet (private, only your devices)
+  forgejo        https://${ts_name}/
+  openbot        http://${ts_ip}:${OPENBOT_PORT:-3001}
+  agent bridge   https://${ts_name}:${TAILSCALE_SERVE_BRIDGE_PORT:-9443}/
+EOF
+  fi
+}
+
+cmd_doctor() {
+  banner
+  local problems=0
+  head_ "health"
+  bash "${OMA_HOME}/verify/healthcheck.sh" || problems=1
+
+  head_ "agent keys"
+  if [[ -f "${CRED_DIR}/openbot.env" ]]; then
+    if grep -q '^CPK_INTELLIGENCE_API_KEY=..' "${CRED_DIR}/openbot.env"; then
+      printf '  %s●%s Intelligence key present\n' "${GRN}" "${RST}"
+    else
+      printf '  %s○%s Intelligence key missing — OpenBot cannot answer\n' "${RED}" "${RST}"
+      printf '    %snpx --yes copilotkit@latest login && npx --yes copilotkit@latest project select%s\n' "${DIM}" "${RST}"
+      problems=1
+    fi
+    if grep -qE '^(OPENAI|ANTHROPIC|GOOGLE)_API_KEY=..' "${CRED_DIR}/openbot.env"; then
+      printf '  %s●%s model key present\n' "${GRN}" "${RST}"
+    else
+      printf '  %s○%s model key missing — the Bots have nothing to spend\n' "${RED}" "${RST}"
+      problems=1
+    fi
+  else
+    printf '  %s○%s no %s/openbot.env\n' "${YEL}" "${RST}" "${CRED_DIR}"
+  fi
+
+  head_ "agents"
+  if curl -fsS --max-time 4 "http://127.0.0.1:${AGENT_BRIDGE_PORT:-8765}/agents" >/tmp/oma-agents.json 2>/dev/null; then
+    python3 - <<'PY'
+import json
+raw = json.load(open("/tmp/oma-agents.json"))
+agents = raw.get("agents", raw if isinstance(raw, list) else [])
+for a in agents:
+    name = a.get("name", "?")
+    cmd  = a.get("command")
+    mark = "●" if cmd else "○"
+    print(f"  {mark} {name:<10} {cmd or '(no command — fill it in)'}")
+PY
+  else
+    printf '  %s○%s the bridge is not answering\n' "${YEL}" "${RST}"
+  fi
+
+  head_ "tailnet"
+  if have tailscale; then
+    tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+self_ = d.get("Self") or {}
+print("  backend :", d.get("BackendState"))
+print("  name    :", (self_.get("DNSName") or "").rstrip("."))
+print("  address :", ", ".join(self_.get("TailscaleIPs") or []))
+print("  tags    :", ", ".join(self_.get("Tags") or []) or "(none — the key expires in 180 days)")
+print("  expires :", self_.get("KeyExpiry") or "never (a tagged node)")
+if self_.get("Expired"):
+    print("  EXPIRED — re-authenticate:  sudo tailscale up --force-reauth")
+health = d.get("Health") or []
+for problem in health:
+    print("  problem :", problem)
+' 2>/dev/null || printf '  %s○%s tailscale is installed but not logged in\n' "${YEL}" "${RST}"
+  else
+    printf '  %s○%s tailscale is not installed\n' "${DIM}" "${RST}"
+  fi
+
+  printf '\n'
+  if (( problems )); then
+    warn "something needs you. The lines marked ○ above say what."
+  else
+    printf '%s● everything is up%s\n' "${GRN}" "${RST}"
+  fi
+}
+
+cmd_logs() {
+  local unit="${1:-}"
+  [[ -n "$unit" ]] || die "which unit? e.g. oma logs forgejo.service"
+  exec journalctl -u "${unit}" -f -n 100 --no-pager
+}
+
+cmd_agent_list() {
+  curl -fsS --max-time 5 "http://127.0.0.1:${AGENT_BRIDGE_PORT:-8765}/agents" \
+    | python3 -c '
+import json,sys
+raw=json.load(sys.stdin)
+agents=raw.get("agents", raw if isinstance(raw,list) else [])
+print(f"{\"name\":<12}{\"default\":<9}command")
+for a in agents:
+    print(f"{a.get(\"name\",\"?\"):<12}{(\"yes\" if a.get(\"default\") else \"\"):<9}{a.get(\"command\") or \"(not set)\"}")
+'
+}
+
+cmd_agent_test() {
+  local name="${1:-${AGENT_DEFAULT:-echo}}"
+  local prompt="${2:-Reply with the single word: alive}"
+  local body
+  body="$(PROMPT="${prompt}" python3 - <<'PY'
+import json, os
+print(json.dumps({
+    "threadId": "oma-cli",
+    "runId": "oma-cli-1",
+    "messages": [{"id": "m1", "role": "user", "content": os.environ.get("PROMPT", "")}],
+}))
+PY
+)"
+  curl -fsS --max-time 120 -X POST \
+    -H 'Content-Type: application/json' \
+    -d "${body}" \
+    "http://127.0.0.1:${AGENT_BRIDGE_PORT:-8765}/ag-ui/${name}"
+}
+
+cmd_handoff_ls() {
+  local root="${HANDOFF_ROOT:-/var/lib/oma-stack/handoff}"
+  for d in inbox outbox done failed; do
+    printf '\n%s%s%s\n' "${BOLD}" "$d" "${RST}"
+    if [[ -d "${root}/$d" ]]; then
+      find "${root}/$d" -maxdepth 1 -type f -printf '  %TY-%Tm-%Td %TH:%TM  %f\n' 2>/dev/null | sort || true
+    else
+      printf '  %s(missing)%s\n' "${DIM}" "${RST}"
+    fi
+  done
+}
+
+cmd_handoff_put() {
+  local file="${1:-}"
+  [[ -n "$file" && -f "$file" ]] || die "which file? e.g. oma handoff put case.md"
+  local root="${HANDOFF_ROOT:-/var/lib/oma-stack/handoff}"
+  install -d -m 0755 "${root}/inbox"
+  cp "${file}" "${root}/inbox/$(basename "${file}")"
+  ok "filed: ${root}/inbox/$(basename "${file}")"
+}
+
+cmd_handoff_watch() {
+  local root="${HANDOFF_ROOT:-/var/lib/oma-stack/handoff}"
+  tail -f "${root}/outbox"/* 2>/dev/null || tail -f "${root}/audit.log"
+}
+
+cmd_serve() {
+  have tailscale || die "tailscale is not installed"
+  case "${1:-show}" in
+    show)
+      tailscale serve status 2>&1 || warn "no serve configuration"
+      ;;
+    refresh)
+      bash "${OMA_HOME}/components/tailscale/serve-refresh.sh"
+      ;;
+    *)
+      die "oma serve [show|refresh]"
+      ;;
+  esac
+}
+
+cmd_update() {
+  command -v git >/dev/null 2>&1 || die "git is required"
+  [[ -d "${OMA_HOME}/.git" ]] || die "${OMA_HOME} is not a git checkout — reinstall instead"
+  git -C "${OMA_HOME}" pull --ff-only
+  bash "${OMA_HOME}/install.sh"
+}
+
+cmd_uninstall() {
+  exec bash "${OMA_HOME}/uninstall.sh" "$@"
+}
+
+usage() {
+  cat <<'EOF'
+oma — your own AI workshop
+
+  oma status              one screen: services, timers, endpoints
+  oma doctor              what is broken and what to do about it
+  oma open                the URLs
+  oma logs <unit>         follow a log
+  oma agent list          the agents the bridge can run
+  oma agent test <name>   run one prompt through one agent
+  oma handoff ls          the queue
+  oma handoff put <file>  file a case for an agent
+  oma handoff watch       follow the answers
+  oma serve [show|refresh] the tailnet entry points
+  oma update              pull the newest kit and reinstall
+  oma uninstall           take it off
+EOF
+}
+
+case "${1:-status}" in
+  status)  cmd_status ;;
+  doctor)  cmd_doctor ;;
+  open)    cmd_open ;;
+  logs)    shift; cmd_logs "$@" ;;
+  agent)   shift; case "${1:-list}" in
+             list) cmd_agent_list ;;
+             test) shift; cmd_agent_test "$@" ;;
+             *) die "oma agent [list|test <name>]" ;;
+           esac ;;
+  handoff) shift; case "${1:-ls}" in
+             ls)   cmd_handoff_ls ;;
+             put)  shift; cmd_handoff_put "$@" ;;
+             watch) cmd_handoff_watch ;;
+             *) die "oma handoff [ls|put <file>|watch]" ;;
+           esac ;;
+  serve)   shift; cmd_serve "$@" ;;
+  update)  cmd_update ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  version) printf 'oma-stack %s\n' "${OMA_VERSION}" ;;
+  help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac

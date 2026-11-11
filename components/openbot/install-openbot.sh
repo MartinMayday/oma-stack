@@ -5,9 +5,10 @@
 # database.  On an 8 GB laptop that matters: the full source deployment wants
 # Bun, a PostgreSQL of its own and two more services.
 #
-# The three things OpenBot refuses to start without are the Intelligence
-# coordinates and a model key.  The installer writes everything else and
-# tells you exactly which two values are still missing.
+# What OpenBot refuses to start without is exactly this: a key encryption
+# key, the Intelligence coordinates (API URL, gateway WS URL, API key) and an
+# identity — which OPENBOT_SINGLE_USER=true supplies.  A *model* key is only
+# needed by OpenBot's own Bots, and the all-in-one image ships none.
 
 set -euo pipefail
 
@@ -82,9 +83,18 @@ ensure_secret WORKER_SHARED_SECRET  "openssl rand -hex 32"
 ensure_secret MANAGED_AGENT_TOKEN   "openssl rand -hex 32"
 
 # --- the agent endpoint allowlist -----------------------------------------
-# OpenBot may only be pointed at an AG-UI agent whose host is listed here.
-# The matching is exact, so both spellings of the host go in: the name the
-# container uses, and the address that name resolves to.
+# Private addresses an agent may be registered at.  The format is host or
+# host:port, comma separated, with no scheme, no path and no wildcards: a URL
+# or a "*" here stops OpenBot from starting, naming the offending entry.
+#
+# The list permits private addresses; it does not restrict which agents may be
+# registered at a public address.  The match is exact against the hostname of
+# the registered URL, so the URL you register must use one of these names.
+#
+# The registered agent URL therefore has to be:
+#     http://host.docker.internal:8765/ag-ui/<name>
+# Inside the container 127.0.0.1 is the container, not this machine, so a
+# loopback URL can never reach the bridge.
 ALLOWED="${OPENBOT_AGENT_ENDPOINT_ALLOWED_HOSTS:-}"
 if [[ "${ENABLE_AGENT_BRIDGE}" == "1" ]]; then
   BRIDGE_HOST="host.docker.internal:${AGENT_BRIDGE_PORT}"
@@ -105,6 +115,10 @@ COMPUTER_TOKEN=
 SUPERVISOR_TOKEN=
 AGENT_TOOL_TOKEN=
 WORKER_SHARED_SECRET=
+# MANAGED_AGENT_TOKEN is inert without MANAGED_AGENT_AG_UI_URL: upstream
+# ignores a leftover token when no URL is set, and the one-image deployment
+# carries no managed Bot.  It is kept so a managed Bot can be switched on
+# later without regenerating anything.
 MANAGED_AGENT_TOKEN=
 OPENBOT_SINGLE_USER=${OPENBOT_SINGLE_USER}
 TRUSTED_ORIGINS=http://localhost:${OPENBOT_PORT},http://127.0.0.1:${OPENBOT_PORT}
@@ -112,9 +126,18 @@ INTELLIGENCE_API_URL=${OPENBOT_INTELLIGENCE_API_URL}
 INTELLIGENCE_GATEWAY_WS_URL=${OPENBOT_INTELLIGENCE_GATEWAY_WS_URL}
 CPK_INTELLIGENCE_API_KEY=${OPENBOT_INTELLIGENCE_API_KEY}
 AGENT_ENDPOINT_ALLOWED_HOSTS=${ALLOWED}
-AGENT_STALL_TIMEOUT_MS=60000
+# How long a Bot's stream may stay silent before OpenBot gives up on the
+# turn.  The default is 60 s, which is shorter than the latency of a real
+# agent behind the bridge; the bridge also sends a heartbeat, so this is the
+# backstop, not the normal path.
+AGENT_STALL_TIMEOUT_MS=${OPENBOT_STALL_TIMEOUT_MS:-300000}
 EOF
 
+# BOT_PROVIDER and BOT_MODEL belong to OpenBot's own framework Bots.  The
+# all-in-one image ships none of them, so these two are inert here: the
+# model that answers is the one behind the agent you registered.  They are
+# written so the file is complete for anyone who later deploys a harness
+# Bot in the same image.
 case "${OPENBOT_MODEL_PROVIDER}" in
   anthropic) printf 'BOT_PROVIDER=anthropic\n' >>"${DESIRED}" ;;
   google)    printf 'BOT_PROVIDER=google\n'    >>"${DESIRED}" ;;
@@ -125,8 +148,13 @@ esac
 # A computer policy that refuses the three commands nobody wants a Bot to
 # run, and allows everything else.  `deny` is evaluated first and beats
 # `allow`; a malformed policy stops the server rather than opening it up.
+#
+# The upstream shell tool is `computer_run_command`, but upstream's own
+# idiom for "a shell command is running" is the `intent` attribute, so the
+# deny rule keys off `intent == "run_command"`.  Denying a tool name that
+# does not exist is a rule that never fires, which is worse than no rule.
 cat >>"${DESIRED}" <<'EOF'
-AGENT_COMPUTER_POLICY={"mode":"enforce","deny":["(tool.name == \"computer_shell\" && (contains(command, \"rm -rf /\") || contains(command, \"mkfs\") || contains(command, \"dd if=\")))"],"allow":["true"]}
+AGENT_COMPUTER_POLICY={"mode":"enforce","deny":["intent == \"run_command\" && (contains(command, \"rm -rf /\") || contains(command, \"rm -fr /\") || contains(command, \"mkfs\") || contains(command, \"dd if=\") || contains(command, \":(){ :|:&};:\"))"],"allow":["true"]}
 EOF
 
 # The model key is not in host.env.  It comes from the operator, either in
@@ -193,6 +221,54 @@ systemctl daemon-reload
 ok "oma-openbot.service installed"
 
 # ---------------------------------------------------------------------------
+# 4b. The scheduled worker
+# ---------------------------------------------------------------------------
+# The image ships no scheduler, so the routines sweep and the staged
+# attachment sweep would never run.  The wrapper runs both inside the
+# running container, where the server's own environment applies.
+log "installing the scheduled worker"
+install -m 0755 "${PROJECT_DIR}/openbot-worker.sh" /usr/local/bin/oma-openbot-worker
+
+cat >/etc/systemd/system/oma-openbot-worker.service <<UNIT
+[Unit]
+Description=OpenBot scheduled worker — routines and staged-attachment sweep
+After=docker.service oma-openbot.service
+Requires=docker.service
+Wants=oma-openbot.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/oma-openbot-worker
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat >/etc/systemd/system/oma-openbot-worker.timer <<UNIT
+[Unit]
+Description=Run the OpenBot scheduled worker every hour
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=oma-openbot-worker.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+if [[ "${OPENBOT_WORKER_TIMER:-1}" == "1" ]]; then
+  systemctl enable --now oma-openbot-worker.timer >/dev/null 2>&1 || \
+    warn "could not enable oma-openbot-worker.timer"
+  ok "oma-openbot-worker.timer installed (hourly)"
+else
+  ok "oma-openbot-worker.timer installed but not enabled"
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Start it
 # ---------------------------------------------------------------------------
 log "pulling the image"
@@ -223,9 +299,16 @@ fi
 # ---------------------------------------------------------------------------
 # 6. What is still missing
 # ---------------------------------------------------------------------------
+# The hard blockers are the Intelligence coordinates and the key encryption
+# key.  A model key is only needed by OpenBot's own Bots, and the all-in-one
+# image ships none — the agents that answer are the ones you registered.
 MISSING=""
 grep -qE '^CPK_INTELLIGENCE_API_KEY=.+' "${ENV_FILE}" || MISSING="${MISSING} CPK_INTELLIGENCE_API_KEY"
-grep -qE '^(OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY)=.+' "${ENV_FILE}" || MISSING="${MISSING} MODEL_KEY"
+grep -qE '^KEY_ENCRYPTION_KEY=.+' "${ENV_FILE}" || MISSING="${MISSING} KEY_ENCRYPTION_KEY"
+
+# A model key is a note, not a blocker.
+MODEL_KEY=0
+grep -qE '^(OPENAI_API_KEY|ANTHROPIC_API_KEY|GOOGLE_API_KEY)=.+' "${ENV_FILE}" || MODEL_KEY=1
 
 cat <<EOF
 
@@ -245,4 +328,20 @@ if [[ -n "${MISSING}" ]]; then
   note "  (or, for local Intelligence: npx --yes copilotkit@latest local connect)"
 else
   ok "every required value is set"
+fi
+
+if (( MODEL_KEY )); then
+  note ""
+  note "no model key — fine.  A model key is only needed by OpenBot's own"
+  note "Bots, and the one-image deployment ships none.  The model that"
+  note "answers you is the one behind the agent you registered."
+fi
+
+if [[ "${ENABLE_AGENT_BRIDGE}" == "1" ]]; then
+  note ""
+  note "register the agent in OpenBot with this URL:"
+  note "  http://host.docker.internal:${AGENT_BRIDGE_PORT}/ag-ui/qoder"
+  note "and add the agent names you want (qoder, glm, minimax) to"
+  note "  ${CRED_DIR}/openbot.env"
+  note "as AGENT_ENDPOINT_ALLOWED_HOSTS entries — host or host:port, no scheme."
 fi
