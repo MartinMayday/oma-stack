@@ -89,7 +89,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. The config survives an update
 # ---------------------------------------------------------------------------
-install -d -m 0700 "${CONFIG_DIR}"
+install -d -m 0711 "${CONFIG_DIR}"
 if [[ -f "${HOST_ENV}" ]]; then
   ok "keeping the existing configuration at ${HOST_ENV}"
 else

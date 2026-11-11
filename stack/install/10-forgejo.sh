@@ -100,7 +100,7 @@ install -d -o forgejo -g forgejo \
 install -d -m 0755 "$MIRROR_CACHE"
 ok "repositories at $REPO_ROOT (internal SSD)"
 
-install -d -m 0700 "$CRED_DIR"
+cred_dir_ensure
 ok "directories ready"
 
 # Where the runner will put job workspaces: the SD card when it is inserted,

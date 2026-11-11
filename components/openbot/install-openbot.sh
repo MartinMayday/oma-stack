@@ -51,7 +51,7 @@ systemctl enable --now docker.service >/dev/null 2>&1 || true
 # 2. Secrets and configuration
 # ---------------------------------------------------------------------------
 log "writing the OpenBot configuration"
-install -d -m 0700 "$CRED_DIR"
+cred_dir_ensure
 install -d -m 0755 "${OPENBOT_DATA_DIR}"
 
 DESIRED="$(mktemp)"

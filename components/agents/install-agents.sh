@@ -50,7 +50,7 @@ ok "python $(python3 --version | cut -d' ' -f2)"
 # 3. The registry
 # ---------------------------------------------------------------------------
 log "writing the agent registry"
-install -d -m 0700 "${CRED_DIR}"
+cred_dir_ensure
 
 AGENTLIB="${AGENTLIB_PATH:-${OPERATOR_HOME}/agent-library}"
 [[ -d "${AGENTLIB}" ]] || AGENTLIB="${OPERATOR_HOME}"
@@ -102,6 +102,14 @@ PY
     note "fill one in:  sudo nano ${AGENT_BRIDGE_REGISTRY}"
   fi
 fi
+
+# The bridge reads the registry AS THE OPERATOR, so the operator must own it.
+# The file lives in a root-owned 0711 directory: the operator can read and
+# edit the file, but cannot add or delete files in the directory.
+chown "${OPERATOR}" "${AGENT_BRIDGE_REGISTRY}" 2>/dev/null || \
+  warn "could not chown ${AGENT_BRIDGE_REGISTRY} to ${OPERATOR}"
+chmod 0600 "${AGENT_BRIDGE_REGISTRY}"
+ok "registry owned by ${OPERATOR}"
 
 # ---------------------------------------------------------------------------
 # 4. The handoff queue

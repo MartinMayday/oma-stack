@@ -348,6 +348,9 @@ check "every script sources the resolved config" bash -c \
 check "the one-liner is in the README" grep -q 'curl -fsSL https://raw.githubusercontent.com/MartinMayday/oma-stack' "$ROOT/README.md"
 check "the uninstaller exists and parses" bash -n "$ROOT/uninstall.sh"
 check "the bootstrap exists and parses" bash -n "$ROOT/bootstrap.sh"
+check "the credential dir stays traversable for the bridge" bash -c \
+  "! grep -rn 'install -d -m 0700 \"\${CRED_DIR}\"\|install -d -m 0700 \"\$CRED_DIR\"' '$ROOT' --include='*.sh' | grep -q ."
+check "the bridge owns its own registry" grep -q 'chown "\${OPERATOR}" "\${AGENT_BRIDGE_REGISTRY}"' "$ROOT/components/agents/install-agents.sh"
 
 # =============================================================================
 head_ "6. the python tests"

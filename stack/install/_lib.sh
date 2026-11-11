@@ -102,3 +102,13 @@ pkg_install() {
     die "no supported package manager found (need pacman or apt-get)"
   fi
 }
+
+# The credential directory holds two kinds of file:
+#   - secrets            0600, root only
+#   - the agent registry the bridge reads AS THE OPERATOR
+# So the directory itself must be traversable (0711) while every file inside
+# keeps its own mode. 0700 here would lock the bridge out of its own registry.
+cred_dir_ensure() {
+  install -d -m 0711 "${CRED_DIR}"
+  chmod 0711 "${CRED_DIR}"
+}
